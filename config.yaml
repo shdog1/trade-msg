@@ -1,6 +1,7 @@
 app:
   timezone: Asia/Shanghai
   report_time: "18:00"
+  data_ready_time: "18:00"
   skip_non_trading_day: true
   report_root: reports
   dry_run_output: reports/latest.html

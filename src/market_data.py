@@ -10,6 +10,8 @@ from typing import Any
 
 import pandas as pd
 
+from .trading_calendar import resolve_trade_date_from_config
+
 
 class MarketDataError(RuntimeError):
     pass
@@ -30,7 +32,7 @@ class MarketData:
 class AkshareMarketProvider:
     """Fetches public A-share market data through AKShare."""
 
-    def fetch(self) -> MarketData:
+    def fetch(self, config: dict[str, Any] | None = None) -> MarketData:
         with bypass_proxy_for_data():
             try:
                 import akshare as ak
@@ -40,10 +42,11 @@ class AkshareMarketProvider:
                 ) from exc
 
             warnings: list[str] = []
+            trade_date = resolve_trade_date_from_config(config or {})
             spot = self._fetch_spot(ak, warnings)
 
             hot_rank = self._optional_call(ak, "stock_hot_rank_em", warnings)
-            limit_pool = self._fetch_limit_pool(ak, warnings)
+            limit_pool = self._fetch_limit_pool(ak, warnings, trade_date)
             indexes = self._optional_call(ak, "stock_zh_index_spot_em", warnings)
             industries = self._optional_call(ak, "stock_board_industry_name_em", warnings)
             concepts = self._optional_call(ak, "stock_board_concept_name_em", warnings)
@@ -55,7 +58,7 @@ class AkshareMarketProvider:
                 indexes=indexes,
                 industries=industries,
                 concepts=concepts,
-                trade_date=date.today(),
+                trade_date=trade_date,
                 warnings=warnings,
             )
 
@@ -118,13 +121,13 @@ class AkshareMarketProvider:
             return pd.DataFrame()
 
     @staticmethod
-    def _fetch_limit_pool(ak: Any, warnings: list[str]) -> pd.DataFrame:
+    def _fetch_limit_pool(ak: Any, warnings: list[str], trade_date: date) -> pd.DataFrame:
         func = getattr(ak, "stock_zt_pool_em", None)
         if func is None:
             warnings.append("AKShare function `stock_zt_pool_em` is unavailable.")
             return pd.DataFrame()
         try:
-            return func(date=date.today().strftime("%Y%m%d"))
+            return func(date=trade_date.strftime("%Y%m%d"))
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"stock_zt_pool_em fetch failed: {exc}")
             return pd.DataFrame()

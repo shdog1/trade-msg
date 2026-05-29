@@ -4,7 +4,6 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .analysis import build_recap
 from .config import Settings, load_settings
@@ -28,12 +27,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run and not args.send:
         args.dry_run = True
 
-    if should_skip_today(settings.raw):
-        print("Today is not a configured trading day. Skipping recap.")
-        return 0
-
     try:
-        data = AkshareMarketProvider().fetch()
+        data = AkshareMarketProvider().fetch(settings.raw)
         recap = build_recap(data, settings.raw)
         title, html, text = render_report(recap, settings.push_title_prefix)
         report_date = recap.market.trade_date.isoformat()
@@ -129,17 +124,6 @@ def send_test_email(title_prefix: str) -> int:
         return 3
     print("Test email sent.")
     return 0
-
-
-def should_skip_today(config: dict) -> bool:
-    if not config.get("app", {}).get("skip_non_trading_day", True):
-        return False
-    timezone = config.get("app", {}).get("timezone", "Asia/Shanghai")
-    try:
-        today = datetime.now(ZoneInfo(timezone)).date()
-    except ZoneInfoNotFoundError:
-        today = datetime.now().date()
-    return today.weekday() >= 5
 
 
 if __name__ == "__main__":

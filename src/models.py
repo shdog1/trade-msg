@@ -6,6 +6,20 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class IndexSnapshot:
+    name: str
+    close: float | None
+    change_pct: float | None
+
+
+@dataclass(frozen=True)
+class HotTopic:
+    name: str
+    change_pct: float | None
+    turnover: float | None = None
+
+
+@dataclass(frozen=True)
 class MarketSnapshot:
     trade_date: date
     total_count: int
@@ -15,6 +29,8 @@ class MarketSnapshot:
     limit_down_count: int
     total_turnover: float
     average_change_pct: float
+    sentiment: str
+    indexes: list[IndexSnapshot] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
 
@@ -42,5 +58,7 @@ class Candidate:
 class Recap:
     market: MarketSnapshot
     candidates: list[Candidate]
+    industries: list[HotTopic]
+    concepts: list[HotTopic]
+    limit_leaders: list[Candidate]
     warnings: list[str]
-

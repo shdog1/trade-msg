@@ -3,7 +3,7 @@ app:
   report_time: "18:00"
   skip_non_trading_day: true
   report_root: reports
-  dry_run_output: reports/latest.md
+  dry_run_output: reports/latest.html
 
 market:
   main_board_prefixes:

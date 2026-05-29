@@ -7,8 +7,24 @@ from typing import Any
 import pandas as pd
 
 from .market_data import MarketData
-from .models import Candidate, MarketSnapshot, Recap
+from .models import Candidate, HotTopic, IndexSnapshot, MarketSnapshot, Recap
 
+
+TEXT = {
+    "no_main_board": "\u4e3b\u677f\u8fc7\u6ee4\u540e\u65e0\u53ef\u7528\u884c\u60c5\u6570\u636e\u3002",
+    "sentiment_hot": "\u504f\u5f3a",
+    "sentiment_warm": "\u4fee\u590d",
+    "sentiment_mixed": "\u9707\u8361",
+    "sentiment_cold": "\u504f\u5f31",
+    "pullback": "\u9f99\u5934\u4f4e\u5438",
+    "rebound": "\u9f99\u5934\u53cd\u5f39",
+    "second_wave": "\u9f99\u5934\u4e8c\u6ce2",
+    "volume": "\u653e\u91cf\u627f\u63a5",
+    "strategy": "\u7b56\u7565\u5339\u914d",
+    "hot_rank": "\u4eba\u6c14\u6392\u540d",
+    "limit_strength": "\u8fde\u677f/\u6da8\u505c\u5f3a\u5ea6",
+    "turnover": "\u6210\u4ea4\u989d",
+}
 
 COLUMN_ALIASES = {
     "code": ["\u4ee3\u7801", "\u80a1\u7968\u4ee3\u7801", "symbol", "code"],
@@ -23,16 +39,39 @@ COLUMN_ALIASES = {
     "limit_up_days": ["\u8fde\u677f\u6570", "\u8fde\u7eed\u6da8\u505c", "limit_up_days"],
 }
 
+TOPIC_ALIASES = {
+    "name": ["\u540d\u79f0", "\u677f\u5757\u540d\u79f0", "name"],
+    "change_pct": ["\u6da8\u8dcc\u5e45", "\u6da8\u5e45", "change_pct"],
+    "turnover": ["\u6210\u4ea4\u989d", "amount", "turnover"],
+}
+
+INDEX_NAMES = {
+    "\u4e0a\u8bc1\u6307\u6570",
+    "\u6df1\u8bc1\u6210\u6307",
+    "\u521b\u4e1a\u677f\u6307",
+    "\u6caa\u6df1300",
+    "\u4e2d\u8bc1500",
+}
+
 
 def build_recap(data: MarketData, config: dict[str, Any]) -> Recap:
-    spot = normalize_spot(data.spot)
-    spot = filter_main_board(spot, config)
+    spot = filter_main_board(normalize_spot(data.spot), config)
     hot_map = normalize_hot_rank(data.hot_rank)
     limit_map = normalize_limit_pool(data.limit_pool)
 
-    market = summarize_market(spot, data.trade_date)
+    market = summarize_market(spot, data.trade_date, data.indexes)
     candidates = score_candidates(spot, hot_map, limit_map, market, config)
-    return Recap(market=market, candidates=candidates, warnings=data.warnings)
+    limit_leaders = build_limit_leaders(spot, hot_map, limit_map, market, config)
+    industries = normalize_topics(data.industries, top_n=5)
+    concepts = normalize_topics(data.concepts, top_n=5)
+    return Recap(
+        market=market,
+        candidates=candidates,
+        industries=industries,
+        concepts=concepts,
+        limit_leaders=limit_leaders,
+        warnings=data.warnings,
+    )
 
 
 def normalize_spot(df: pd.DataFrame) -> pd.DataFrame:
@@ -110,7 +149,7 @@ def normalize_limit_pool(df: pd.DataFrame) -> dict[str, int]:
     return result
 
 
-def summarize_market(df: pd.DataFrame, trade_date: date) -> MarketSnapshot:
+def summarize_market(df: pd.DataFrame, trade_date: date, index_df: pd.DataFrame) -> MarketSnapshot:
     total = len(df)
     up = int((df["change_pct"] > 0).sum())
     down = int((df["change_pct"] < 0).sum())
@@ -120,7 +159,7 @@ def summarize_market(df: pd.DataFrame, trade_date: date) -> MarketSnapshot:
     avg_change = float(df["change_pct"].mean()) if total else 0.0
     notes: list[str] = []
     if total == 0:
-        notes.append("No usable main-board quote rows after filtering.")
+        notes.append(TEXT["no_main_board"])
     return MarketSnapshot(
         trade_date=trade_date,
         total_count=total,
@@ -130,8 +169,84 @@ def summarize_market(df: pd.DataFrame, trade_date: date) -> MarketSnapshot:
         limit_down_count=limit_down,
         total_turnover=turnover,
         average_change_pct=avg_change,
+        sentiment=market_sentiment(total, up, limit_up, limit_down, avg_change),
+        indexes=normalize_indexes(index_df),
         notes=notes,
     )
+
+
+def normalize_indexes(df: pd.DataFrame) -> list[IndexSnapshot]:
+    if df.empty:
+        return []
+    name_col = next((name for name in COLUMN_ALIASES["name"] if name in df.columns), None)
+    close_col = next((name for name in COLUMN_ALIASES["close"] if name in df.columns), None)
+    change_col = next((name for name in COLUMN_ALIASES["change_pct"] if name in df.columns), None)
+    if not name_col:
+        return []
+    rows: list[IndexSnapshot] = []
+    for item in df.to_dict("records"):
+        name = str(item.get(name_col, ""))
+        if name not in INDEX_NAMES:
+            continue
+        rows.append(
+            IndexSnapshot(
+                name=name,
+                close=_optional_float(item.get(close_col)) if close_col else None,
+                change_pct=_optional_float(item.get(change_col)) if change_col else None,
+            )
+        )
+    return rows[:5]
+
+
+def normalize_topics(df: pd.DataFrame, top_n: int) -> list[HotTopic]:
+    if df.empty:
+        return []
+    name_col = next((name for name in TOPIC_ALIASES["name"] if name in df.columns), None)
+    change_col = next((name for name in TOPIC_ALIASES["change_pct"] if name in df.columns), None)
+    turnover_col = next((name for name in TOPIC_ALIASES["turnover"] if name in df.columns), None)
+    if not name_col or not change_col:
+        return []
+    work = df.copy()
+    work["_change"] = pd.to_numeric(work[change_col], errors="coerce")
+    work = work.dropna(subset=["_change"]).sort_values("_change", ascending=False)
+    result: list[HotTopic] = []
+    for row in work.head(top_n).to_dict("records"):
+        result.append(
+            HotTopic(
+                name=str(row.get(name_col, "")),
+                change_pct=_optional_float(row.get(change_col)),
+                turnover=_optional_float(row.get(turnover_col)) if turnover_col else None,
+            )
+        )
+    return result
+
+
+def market_sentiment(total: int, up: int, limit_up: int, limit_down: int, avg_change: float) -> str:
+    breadth = up / total if total else 0
+    if breadth >= 0.62 and limit_up >= 45 and avg_change > 0:
+        return TEXT["sentiment_hot"]
+    if breadth >= 0.52 and avg_change >= -0.2:
+        return TEXT["sentiment_warm"]
+    if breadth >= 0.42:
+        return TEXT["sentiment_mixed"]
+    if limit_down > max(8, limit_up * 0.4):
+        return TEXT["sentiment_cold"]
+    return TEXT["sentiment_cold"]
+
+
+def build_limit_leaders(
+    df: pd.DataFrame,
+    hot_map: dict[str, int],
+    limit_map: dict[str, int],
+    market: MarketSnapshot,
+    config: dict[str, Any],
+) -> list[Candidate]:
+    if not limit_map:
+        return []
+    rows = df[df["code"].isin(limit_map.keys())].copy()
+    if rows.empty:
+        return []
+    return score_candidates(rows, hot_map, limit_map, market, config)[:5]
 
 
 def score_candidates(
@@ -146,7 +261,7 @@ def score_candidates(
 
     pool = df.loc[df["turnover"] >= min_turnover].copy()
     if pool.empty:
-        pool = df.sort_values("turnover", ascending=False).head(max_candidates * 2).copy()
+        pool = df.sort_values("turnover", ascending=False).head(max_candidates * 3).copy()
 
     candidates: list[Candidate] = []
     for row in pool.to_dict("records"):
@@ -187,24 +302,22 @@ def strategy_tags(row: dict[str, Any], hot_rank: int | None, limit_days: int | N
     change = float(row.get("change_pct") or 0)
     turnover_rate = _optional_float(row.get("turnover_rate"))
     volume_ratio = _optional_float(row.get("volume_ratio"))
+    turnover = float(row.get("turnover") or 0)
     tags: list[str] = []
 
     is_hot = hot_rank is not None and hot_rank <= 80
     is_limit_leader = limit_days is not None and limit_days >= 1
-    is_liquid = float(row.get("turnover") or 0) >= 300_000_000
+    is_liquid = turnover >= 300_000_000
+    fallback_hot = is_liquid and (turnover_rate or 0) >= 3
 
-    # The hot-rank and limit-up sources can fail independently; keep a pure-data fallback.
-    if not is_hot and not is_limit_leader:
-        is_hot = is_liquid and (turnover_rate or 0) >= 3
-
-    if is_liquid and (is_hot or is_limit_leader) and -4 <= change <= 3:
-        tags.append("leader pullback watch")
-    if is_liquid and (is_hot or is_limit_leader) and 3 < change < 9.8:
-        tags.append("leader rebound watch")
-    if is_liquid and is_limit_leader and limit_days >= 2:
-        tags.append("leader second-wave watch")
+    if is_liquid and (is_hot or is_limit_leader or fallback_hot) and -4 <= change <= 3:
+        tags.append(TEXT["pullback"])
+    if is_liquid and (is_hot or is_limit_leader or fallback_hot) and 3 < change < 9.8:
+        tags.append(TEXT["rebound"])
+    if is_liquid and (is_limit_leader or (fallback_hot and change > 2)) and limit_days and limit_days >= 2:
+        tags.append(TEXT["second_wave"])
     if turnover_rate and volume_ratio and turnover_rate >= 5 and volume_ratio >= 1.2 and 0 <= change <= 7:
-        tags.append("volume support watch")
+        tags.append(TEXT["volume"])
     return tags
 
 
@@ -250,34 +363,34 @@ def build_reasons(
     limit_days: int | None,
     tags: list[str],
 ) -> list[str]:
-    reasons = [f"strategy: {', '.join(tags)}"]
+    reasons = [f"{TEXT['strategy']}: {'/'.join(tags)}"]
     if hot_rank is not None:
-        reasons.append(f"hot rank: {hot_rank}")
+        reasons.append(f"{TEXT['hot_rank']}: {hot_rank}")
     if limit_days is not None:
-        reasons.append(f"limit-up strength: {limit_days}")
-    reasons.append(f"turnover: {format_amount(float(row.get('turnover') or 0))}")
+        reasons.append(f"{TEXT['limit_strength']}: {limit_days}")
+    reasons.append(f"{TEXT['turnover']}: {format_amount(float(row.get('turnover') or 0))}")
     return reasons
 
 
 def build_trigger(row: dict[str, Any], tags: list[str]) -> str:
     close = float(row["close"])
-    if any("pullback" in tag for tag in tags):
-        return f"Watch only if it holds above {close * 0.97:.2f} and reclaims intraday VWAP."
-    if any("second-wave" in tag for tag in tags):
-        return f"Watch breakout above {close * 1.03:.2f} with sector strength still active."
-    return f"Watch breakout above {close * 1.02:.2f}; avoid chasing if gap-up is above 3%."
+    if TEXT["pullback"] in tags:
+        return f"\u6b21\u65e5\u56de\u8e29\u4e0d\u7834 {close * 0.97:.2f}\uff0c\u4e14\u5206\u65f6\u653e\u91cf\u56de\u6536\u5747\u7ebf\u540e\u518d\u89c2\u5bdf\u3002"
+    if TEXT["second_wave"] in tags:
+        return f"\u6b21\u65e5\u7a81\u7834\u5e76\u7ad9\u7a33 {close * 1.03:.2f}\uff0c\u540c\u65f6\u677f\u5757\u68af\u961f\u4ecd\u5728\u3002"
+    return f"\u6b21\u65e5\u9ad8\u5f00\u4e0d\u8d85 3%\uff0c\u653e\u91cf\u7a81\u7834 {close * 1.02:.2f} \u540e\u89c2\u5bdf\u3002"
 
 
 def build_invalidation(row: dict[str, Any]) -> str:
     close = float(row["close"])
-    return f"Invalid below {close * 0.95:.2f} or if sector leaders weaken sharply."
+    return f"\u8dcc\u7834 {close * 0.95:.2f} \u6216\u677f\u5757\u6838\u5fc3\u80a1\u660e\u663e\u8d70\u5f31\uff0c\u5219\u89c2\u5bdf\u5931\u6548\u3002"
 
 
 def format_amount(amount: float) -> str:
     if amount >= 100_000_000:
-        return f"{amount / 100_000_000:.1f}B CNY"
+        return f"{amount / 100_000_000:.1f}\u4ebf"
     if amount >= 10_000:
-        return f"{amount / 10_000:.0f}W CNY"
+        return f"{amount / 10_000:.0f}\u4e07"
     return f"{amount:.0f}"
 
 

@@ -20,6 +20,9 @@ class MarketData:
     spot: pd.DataFrame
     hot_rank: pd.DataFrame
     limit_pool: pd.DataFrame
+    indexes: pd.DataFrame
+    industries: pd.DataFrame
+    concepts: pd.DataFrame
     trade_date: date
     warnings: list[str]
 
@@ -41,11 +44,17 @@ class AkshareMarketProvider:
 
             hot_rank = self._optional_call(ak, "stock_hot_rank_em", warnings)
             limit_pool = self._fetch_limit_pool(ak, warnings)
+            indexes = self._optional_call(ak, "stock_zh_index_spot_em", warnings)
+            industries = self._optional_call(ak, "stock_board_industry_name_em", warnings)
+            concepts = self._optional_call(ak, "stock_board_concept_name_em", warnings)
 
             return MarketData(
                 spot=spot,
                 hot_rank=hot_rank,
                 limit_pool=limit_pool,
+                indexes=indexes,
+                industries=industries,
+                concepts=concepts,
                 trade_date=date.today(),
                 warnings=warnings,
             )

@@ -63,12 +63,14 @@ class EmailNotifier:
     def from_env(cls) -> "EmailNotifier":
         return cls(config=EmailConfig.from_env())
 
-    def send(self, title: str, content: str) -> None:
+    def send(self, title: str, text_content: str, html_content: str | None = None) -> None:
         message = EmailMessage()
         message["Subject"] = title
         message["From"] = self.config.sender
         message["To"] = ", ".join(self.config.recipients)
-        message.set_content(content, subtype="plain", charset="utf-8")
+        message.set_content(text_content, subtype="plain", charset="utf-8")
+        if html_content:
+            message.add_alternative(html_content, subtype="html", charset="utf-8")
 
         try:
             if self.config.use_ssl:
@@ -84,4 +86,3 @@ class EmailNotifier:
             raise NotifyError(f"Email send failed: {exc}") from exc
         except smtplib.SMTPException as exc:
             raise NotifyError(f"SMTP send failed: {exc}") from exc
-

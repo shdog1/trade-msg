@@ -23,6 +23,13 @@ Run a dry report without sending:
 python -m src.cli --dry-run
 ```
 
+The dry run writes:
+
+- `reports/latest.html`
+- `reports/latest.txt`
+- `reports/YYYY-MM-DD/recap.html`
+- `reports/YYYY-MM-DD/recap.txt`
+
 Send a real email message:
 
 ```powershell
@@ -50,7 +57,9 @@ python -m unittest discover -s tests -v
 ## What the report contains
 
 - Market breadth and turnover overview.
-- Limit-up and hot-rank leader context when available.
+- Indexes, breadth, limit-up/limit-down counts, turnover, and sentiment.
+- Limit-up pool, board height, hot-rank leader context, industry heat, and
+  concept heat when available.
 - Main-board candidates only by default.
 - Strategy tags for leading-stock rebound, low-suction pullback, and second-wave
   setups.
@@ -63,7 +72,7 @@ Most behavior lives in `config.yaml`:
 - main-board code prefixes and exclusions
 - score weights
 - candidate count
-- push template
+- HTML email and archive output
 - task time
 
 Secrets live in `.env` and are not committed.

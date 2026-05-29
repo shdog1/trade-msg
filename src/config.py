@@ -31,7 +31,10 @@ class Settings:
         return self.root / configured
 
     def dated_report_output(self, date_text: str) -> Path:
-        return self.report_root / date_text / "recap.md"
+        return self.report_root / date_text / "recap.html"
+
+    def dated_text_output(self, date_text: str) -> Path:
+        return self.report_root / date_text / "recap.txt"
 
     @property
     def push_title_prefix(self) -> str:

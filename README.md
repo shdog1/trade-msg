@@ -30,6 +30,10 @@ The dry run writes:
 - `reports/YYYY-MM-DD/recap.html`
 - `reports/YYYY-MM-DD/recap.txt`
 
+Report dates use the latest available trading day. Before 09:00 China time, the
+report is assigned to the previous trading day; on weekends and holidays it also
+rolls back to the latest trading day.
+
 Send a real email message:
 
 ```powershell

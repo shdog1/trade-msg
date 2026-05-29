@@ -11,9 +11,9 @@ class TradingCalendarTest(unittest.TestCase):
         trade_dates = {date(2026, 5, 29), date(2026, 6, 1)}
 
         result = latest_closed_trade_date(
-            datetime(2026, 6, 1, 9, 30),
+            datetime(2026, 6, 1, 8, 59),
             trade_dates=trade_dates,
-            close_ready_time=time(18, 0),
+            data_ready_time=time(9, 0),
         )
 
         self.assertEqual(result, date(2026, 5, 29))
@@ -24,18 +24,18 @@ class TradingCalendarTest(unittest.TestCase):
         result = latest_closed_trade_date(
             datetime(2026, 5, 30, 0, 5),
             trade_dates=trade_dates,
-            close_ready_time=time(18, 0),
+            data_ready_time=time(9, 0),
         )
 
         self.assertEqual(result, date(2026, 5, 29))
 
-    def test_after_ready_time_uses_same_trade_date(self) -> None:
+    def test_after_9am_uses_same_trade_date(self) -> None:
         trade_dates = {date(2026, 5, 29)}
 
         result = latest_closed_trade_date(
-            datetime(2026, 5, 29, 18, 1),
+            datetime(2026, 5, 29, 9, 1),
             trade_dates=trade_dates,
-            close_ready_time=time(18, 0),
+            data_ready_time=time(9, 0),
         )
 
         self.assertEqual(result, date(2026, 5, 29))
@@ -43,4 +43,3 @@ class TradingCalendarTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

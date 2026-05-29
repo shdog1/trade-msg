@@ -25,11 +25,11 @@ def now_in_timezone(name: str) -> datetime:
 def latest_closed_trade_date(
     now: datetime,
     trade_dates: set[date] | None = None,
-    close_ready_time: time = time(18, 0),
+    data_ready_time: time = time(9, 0),
 ) -> date:
     calendar = trade_dates or fallback_trade_dates(now.date())
     current = now.date()
-    if current in calendar and now.time() >= close_ready_time:
+    if current in calendar and now.time() >= data_ready_time:
         return current
 
     cursor = current - timedelta(days=1)
@@ -69,8 +69,8 @@ def load_trade_dates_from_akshare() -> set[date]:
 def resolve_trade_date_from_config(config: dict[str, Any]) -> date:
     app = config.get("app", {})
     timezone = str(app.get("timezone", "Asia/Shanghai"))
-    close_time_text = str(app.get("data_ready_time", app.get("report_time", "18:00")))
-    close_ready_time = parse_time(close_time_text)
+    data_time_text = str(app.get("data_ready_time", "09:00"))
+    data_ready_time = parse_time(data_time_text)
     now = now_in_timezone(timezone)
 
     try:
@@ -80,10 +80,9 @@ def resolve_trade_date_from_config(config: dict[str, Any]) -> date:
     if not trade_dates:
         trade_dates = fallback_trade_dates(now.date())
 
-    return latest_closed_trade_date(now, trade_dates, close_ready_time)
+    return latest_closed_trade_date(now, trade_dates, data_ready_time)
 
 
 def parse_time(value: str) -> time:
     hour_text, minute_text = value.split(":", maxsplit=1)
     return time(hour=int(hour_text), minute=int(minute_text))
-

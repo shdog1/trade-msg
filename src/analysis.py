@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date
 from typing import Any
 
@@ -10,16 +11,16 @@ from .models import Candidate, MarketSnapshot, Recap
 
 
 COLUMN_ALIASES = {
-    "code": ["代码", "股票代码", "symbol"],
-    "name": ["名称", "股票简称", "name"],
-    "close": ["最新价", "收盘", "close"],
-    "change_pct": ["涨跌幅", "涨幅", "change_pct"],
-    "turnover": ["成交额", "amount", "turnover"],
-    "volume_ratio": ["量比", "volume_ratio"],
-    "amplitude_pct": ["振幅", "amplitude"],
-    "turnover_rate": ["换手率", "turnover_rate"],
-    "hot_rank": ["排名", "当前排名", "hot_rank"],
-    "limit_up_days": ["连板数", "连续涨停", "limit_up_days"],
+    "code": ["\u4ee3\u7801", "\u80a1\u7968\u4ee3\u7801", "symbol", "code"],
+    "name": ["\u540d\u79f0", "\u80a1\u7968\u7b80\u79f0", "name"],
+    "close": ["\u6700\u65b0\u4ef7", "\u6536\u76d8", "trade", "close"],
+    "change_pct": ["\u6da8\u8dcc\u5e45", "\u6da8\u5e45", "changepercent", "change_pct"],
+    "turnover": ["\u6210\u4ea4\u989d", "amount", "turnover"],
+    "volume_ratio": ["\u91cf\u6bd4", "volume_ratio"],
+    "amplitude_pct": ["\u632f\u5e45", "amplitude"],
+    "turnover_rate": ["\u6362\u624b\u7387", "turnoverratio", "turnover_rate"],
+    "hot_rank": ["\u6392\u540d", "\u5f53\u524d\u6392\u540d", "hot_rank"],
+    "limit_up_days": ["\u8fde\u677f\u6570", "\u8fde\u7eed\u6da8\u505c", "limit_up_days"],
 }
 
 
@@ -46,12 +47,17 @@ def normalize_spot(df: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Spot data is missing required columns: {sorted(missing)}")
 
-    normalized["code"] = normalized["code"].astype(str).str.zfill(6)
+    normalized["code"] = normalized["code"].map(normalize_stock_code)
     normalized["name"] = normalized["name"].astype(str)
     for col in ["close", "change_pct", "turnover", "volume_ratio", "amplitude_pct", "turnover_rate"]:
         if col in normalized.columns:
             normalized[col] = pd.to_numeric(normalized[col], errors="coerce")
-    return normalized.dropna(subset=["close", "change_pct", "turnover"])
+    return normalized.dropna(subset=["code", "close", "change_pct", "turnover"])
+
+
+def normalize_stock_code(value: Any) -> str | None:
+    match = re.search(r"(\d{6})", str(value))
+    return match.group(1) if match else None
 
 
 def filter_main_board(df: pd.DataFrame, config: dict[str, Any]) -> pd.DataFrame:
@@ -76,11 +82,11 @@ def normalize_hot_rank(df: pd.DataFrame) -> dict[str, int]:
             normalized[target] = df[source]
     if {"code", "hot_rank"} - set(normalized.columns):
         return {}
-    normalized["code"] = normalized["code"].astype(str).str.zfill(6)
+    normalized["code"] = normalized["code"].map(normalize_stock_code)
     normalized["hot_rank"] = pd.to_numeric(normalized["hot_rank"], errors="coerce")
     return {
         row.code: int(row.hot_rank)
-        for row in normalized.dropna(subset=["hot_rank"]).itertuples()
+        for row in normalized.dropna(subset=["code", "hot_rank"]).itertuples()
     }
 
 
@@ -93,8 +99,8 @@ def normalize_limit_pool(df: pd.DataFrame) -> dict[str, int]:
         return {}
     result: dict[str, int] = {}
     for row in df.to_dict("records"):
-        code = str(row.get(code_col, "")).zfill(6)
-        if not code.strip("0"):
+        code = normalize_stock_code(row.get(code_col, ""))
+        if not code:
             continue
         raw_days = row.get(days_col, 1) if days_col else 1
         try:
@@ -114,7 +120,7 @@ def summarize_market(df: pd.DataFrame, trade_date: date) -> MarketSnapshot:
     avg_change = float(df["change_pct"].mean()) if total else 0.0
     notes: list[str] = []
     if total == 0:
-        notes.append("主板过滤后无可用行情数据。")
+        notes.append("No usable main-board quote rows after filtering.")
     return MarketSnapshot(
         trade_date=trade_date,
         total_count=total,
@@ -153,7 +159,6 @@ def score_candidates(
 
         parts = score_parts(row, hot_rank, limit_days, market, tags)
         score = max(0, min(100, round(sum(parts.values()))))
-        reasons = build_reasons(row, hot_rank, limit_days, tags)
         candidates.append(
             Candidate(
                 code=code,
@@ -170,7 +175,7 @@ def score_candidates(
                 score_parts=parts,
                 trigger=build_trigger(row, tags),
                 invalidation=build_invalidation(row),
-                reasons=reasons,
+                reasons=build_reasons(row, hot_rank, limit_days, tags),
                 raw=row,
             )
         )
@@ -188,14 +193,18 @@ def strategy_tags(row: dict[str, Any], hot_rank: int | None, limit_days: int | N
     is_limit_leader = limit_days is not None and limit_days >= 1
     is_liquid = float(row.get("turnover") or 0) >= 300_000_000
 
+    # The hot-rank and limit-up sources can fail independently; keep a pure-data fallback.
+    if not is_hot and not is_limit_leader:
+        is_hot = is_liquid and (turnover_rate or 0) >= 3
+
     if is_liquid and (is_hot or is_limit_leader) and -4 <= change <= 3:
-        tags.append("龙头低吸观察")
+        tags.append("leader pullback watch")
     if is_liquid and (is_hot or is_limit_leader) and 3 < change < 9.8:
-        tags.append("龙头反弹观察")
+        tags.append("leader rebound watch")
     if is_liquid and is_limit_leader and limit_days >= 2:
-        tags.append("龙头二波观察")
+        tags.append("leader second-wave watch")
     if turnover_rate and volume_ratio and turnover_rate >= 5 and volume_ratio >= 1.2 and 0 <= change <= 7:
-        tags.append("放量承接观察")
+        tags.append("volume support watch")
     return tags
 
 
@@ -209,11 +218,13 @@ def score_parts(
     breadth = market.up_count / market.total_count if market.total_count else 0
     market_score = min(20, max(0, round(8 + breadth * 10 + market.limit_up_count / 20)))
 
-    leader = 0
+    leader = 5
     if hot_rank is not None:
         leader += max(0, 14 - hot_rank // 8)
     if limit_days is not None:
         leader += min(11, 5 + limit_days * 3)
+    if hot_rank is None and limit_days is None:
+        leader += min(12, round(float(row.get("turnover") or 0) / 500_000_000 * 3))
     leader = min(25, leader)
 
     strategy = min(25, 10 + len(tags) * 5)
@@ -239,34 +250,34 @@ def build_reasons(
     limit_days: int | None,
     tags: list[str],
 ) -> list[str]:
-    reasons = [f"策略匹配：{'、'.join(tags)}"]
+    reasons = [f"strategy: {', '.join(tags)}"]
     if hot_rank is not None:
-        reasons.append(f"东方财富人气排名约第 {hot_rank} 位")
+        reasons.append(f"hot rank: {hot_rank}")
     if limit_days is not None:
-        reasons.append(f"涨停池记录：{limit_days} 连板/涨停强度")
-    reasons.append(f"成交额 {format_amount(float(row.get('turnover') or 0))}")
+        reasons.append(f"limit-up strength: {limit_days}")
+    reasons.append(f"turnover: {format_amount(float(row.get('turnover') or 0))}")
     return reasons
 
 
 def build_trigger(row: dict[str, Any], tags: list[str]) -> str:
     close = float(row["close"])
-    if any("低吸" in tag for tag in tags):
-        return f"次日回踩不破 {close * 0.97:.2f} 且分时放量回收均线时再观察。"
-    if any("二波" in tag for tag in tags):
-        return f"次日突破并站稳 {close * 1.03:.2f}，同时板块仍有涨停梯队。"
-    return f"次日高开不超过 3%，放量突破 {close * 1.02:.2f} 后观察。"
+    if any("pullback" in tag for tag in tags):
+        return f"Watch only if it holds above {close * 0.97:.2f} and reclaims intraday VWAP."
+    if any("second-wave" in tag for tag in tags):
+        return f"Watch breakout above {close * 1.03:.2f} with sector strength still active."
+    return f"Watch breakout above {close * 1.02:.2f}; avoid chasing if gap-up is above 3%."
 
 
 def build_invalidation(row: dict[str, Any]) -> str:
     close = float(row["close"])
-    return f"跌破 {close * 0.95:.2f} 或板块核心股明显走弱，则观察失效。"
+    return f"Invalid below {close * 0.95:.2f} or if sector leaders weaken sharply."
 
 
 def format_amount(amount: float) -> str:
     if amount >= 100_000_000:
-        return f"{amount / 100_000_000:.1f} 亿"
+        return f"{amount / 100_000_000:.1f}B CNY"
     if amount >= 10_000:
-        return f"{amount / 10_000:.0f} 万"
+        return f"{amount / 10_000:.0f}W CNY"
     return f"{amount:.0f}"
 
 

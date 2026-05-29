@@ -26,6 +26,14 @@ class Settings:
         return self.root / configured
 
     @property
+    def report_root(self) -> Path:
+        configured = self.raw["app"].get("report_root", "reports")
+        return self.root / configured
+
+    def dated_report_output(self, date_text: str) -> Path:
+        return self.report_root / date_text / "recap.md"
+
+    @property
     def push_title_prefix(self) -> str:
         notify = self.raw.get("notify", {})
         legacy_push = self.raw.get("push", {})
@@ -42,4 +50,3 @@ def load_settings(path: str | Path | None = None) -> Settings:
     with config_path.open("r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
     return Settings(raw=raw)
-

@@ -35,6 +35,18 @@ class AnalysisTest(unittest.TestCase):
 
         self.assertEqual(filtered["code"].tolist(), ["600001"])
 
+    def test_normalize_spot_strips_exchange_prefix(self) -> None:
+        df = normalize_spot(
+            pd.DataFrame(
+                [
+                    {"代码": "sh600001", "名称": "主板A", "最新价": 10, "涨跌幅": 1, "成交额": 2},
+                    {"代码": "sz000001", "名称": "主板B", "最新价": 9, "涨跌幅": -1, "成交额": 3},
+                ]
+            )
+        )
+
+        self.assertEqual(df["code"].tolist(), ["600001", "000001"])
+
     def test_build_recap_scores_candidates(self) -> None:
         data = MarketData(
             spot=pd.DataFrame(
@@ -78,7 +90,7 @@ class AnalysisTest(unittest.TestCase):
         self.assertGreaterEqual(len(recap.candidates), 1)
         self.assertGreaterEqual(recap.candidates[0].score, 0)
         self.assertLessEqual(recap.candidates[0].score, 100)
-        self.assertTrue(any("龙头" in tag for tag in recap.candidates[0].strategy_tags))
+        self.assertTrue(any("leader" in tag for tag in recap.candidates[0].strategy_tags))
 
 
 if __name__ == "__main__":

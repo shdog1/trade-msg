@@ -36,11 +36,13 @@ def main(argv: list[str] | None = None) -> int:
         data = AkshareMarketProvider().fetch()
         recap = build_recap(data, settings.raw)
         title, markdown = render_markdown(recap, settings.push_title_prefix)
+        report_date = recap.market.trade_date.isoformat()
     except (MarketDataError, ValueError) as exc:
         if args.send:
             cached = load_recent_cached_report(settings)
             if cached:
                 title, markdown = cached
+                report_date = date_from_title(title)
                 print(f"Live data fetch failed; sending cached report instead: {exc}", file=sys.stderr)
             else:
                 print(f"Failed to build recap: {exc}", file=sys.stderr)
@@ -50,9 +52,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     if args.dry_run:
-        output = settings.dry_run_output
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(markdown, encoding="utf-8")
+        output = write_report_files(settings, markdown, report_date)
         print(f"Wrote dry-run report to {output}")
 
     if args.send:
@@ -82,11 +82,29 @@ def load_recent_cached_report(settings: Settings) -> tuple[str, str] | None:
     return title, content
 
 
+def write_report_files(settings: Settings, markdown: str, date_text: str) -> Path:
+    dated_output = settings.dated_report_output(date_text)
+    dated_output.parent.mkdir(parents=True, exist_ok=True)
+    dated_output.write_text(markdown, encoding="utf-8")
+
+    latest_output = settings.dry_run_output
+    latest_output.parent.mkdir(parents=True, exist_ok=True)
+    latest_output.write_text(markdown, encoding="utf-8")
+    return dated_output
+
+
 def title_from_markdown(content: str, fallback: str) -> str:
     for line in content.splitlines():
         if line.startswith("# "):
             return line[2:].strip() or fallback
     return fallback
+
+
+def date_from_title(title: str) -> str:
+    for part in title.split():
+        if len(part) == 10 and part[4] == "-" and part[7] == "-":
+            return part
+    return datetime.now().date().isoformat()
 
 
 def send_test_email(title_prefix: str) -> int:

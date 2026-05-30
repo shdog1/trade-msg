@@ -72,7 +72,7 @@ class AkshareMarketProvider:
                 ) from exc
             return self._call(ak.stock_info_a_code_name, "A-share stock basic")
 
-    def fetch_daily_bars(self, code: str, start_date: date, end_date: date) -> pd.DataFrame:
+    def fetch_daily_bars(self, code: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str]:
         with bypass_proxy_for_data():
             try:
                 import akshare as ak
@@ -80,21 +80,58 @@ class AkshareMarketProvider:
                 raise MarketDataError(
                     "AKShare is not installed. Run `pip install -r requirements.txt` first."
                 ) from exc
-            last_error: Exception | None = None
-            for attempt in range(1, 4):
-                try:
-                    return ak.stock_zh_a_hist(
+
+            start = start_date.strftime("%Y%m%d")
+            end = end_date.strftime("%Y%m%d")
+            exchange_symbol = to_exchange_symbol(code)
+            sources = [
+                (
+                    "eastmoney",
+                    lambda: ak.stock_zh_a_hist(
                         symbol=code,
                         period="daily",
-                        start_date=start_date.strftime("%Y%m%d"),
-                        end_date=end_date.strftime("%Y%m%d"),
+                        start_date=start,
+                        end_date=end,
                         adjust="",
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    last_error = exc
-                    if attempt < 3:
-                        sleep(2)
-            raise MarketDataError(f"Failed to fetch daily bars for {code}: {last_error}")
+                    ),
+                ),
+                (
+                    "tencent",
+                    lambda: ak.stock_zh_a_hist_tx(
+                        symbol=exchange_symbol,
+                        start_date=start,
+                        end_date=end,
+                        adjust="",
+                    ),
+                ),
+                (
+                    "sina",
+                    lambda: ak.stock_zh_a_daily(
+                        symbol=exchange_symbol,
+                        start_date=start,
+                        end_date=end,
+                        adjust="",
+                    ),
+                ),
+            ]
+            errors: list[str] = []
+            for source_name, fetcher in sources:
+                last_error: Exception | None = None
+                for attempt in range(1, 3):
+                    try:
+                        df = fetcher()
+                    except Exception as exc:  # noqa: BLE001
+                        last_error = exc
+                        if attempt < 2:
+                            sleep(1.5)
+                        continue
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        return df, source_name
+                    last_error = MarketDataError("returned no rows")
+                    break
+                errors.append(f"{source_name}: {last_error}")
+                sleep(0.5)
+            raise MarketDataError(f"Failed to fetch daily bars for {code}: {' | '.join(errors)}")
 
     def _fetch_spot(self, ak: Any, warnings: list[str]) -> pd.DataFrame:
         sources = [
@@ -197,3 +234,10 @@ def bypass_proxy_for_data() -> Iterator[None]:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def to_exchange_symbol(code: str) -> str:
+    normalized = str(code).strip()[-6:]
+    if normalized.startswith(("600", "601", "603", "605", "688", "689")):
+        return f"sh{normalized}"
+    return f"sz{normalized}"

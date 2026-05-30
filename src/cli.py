@@ -4,6 +4,7 @@ import argparse
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from time import sleep
 
 from .analysis import build_recap
 from .config import Settings, load_settings
@@ -22,6 +23,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fetch-only", action="store_true", help="Fetch market data into MySQL without rendering.")
     parser.add_argument("--backfill-days", type=int, default=None, help="Backfill daily bars for recent N days.")
     parser.add_argument("--backfill-stock", default=None, help="Backfill daily bars for one stock code.")
+    parser.add_argument(
+        "--backfill-sleep",
+        type=float,
+        default=1.0,
+        help="Seconds to wait between daily bar requests during backfill.",
+    )
     parser.add_argument("--date", default=None, help="Trade date to recap, e.g. 2026-05-29.")
     parser.add_argument("--test-email", action="store_true", help="Send a test email without fetching data.")
     args = parser.parse_args(argv)
@@ -45,7 +52,14 @@ def main(argv: list[str] | None = None) -> int:
         return fetch_into_database(store, settings, trade_date)
 
     if args.backfill_days is not None:
-        return backfill_daily_bars(store, settings, trade_date, args.backfill_days, args.backfill_stock)
+        return backfill_daily_bars(
+            store,
+            settings,
+            trade_date,
+            args.backfill_days,
+            args.backfill_stock,
+            max(args.backfill_sleep, 0),
+        )
 
     try:
         ensure_market_data(store, settings, trade_date)
@@ -116,6 +130,7 @@ def backfill_daily_bars(
     trade_date: date,
     days: int,
     stock_code: str | None,
+    request_sleep: float = 1.0,
 ) -> int:
     provider = AkshareMarketProvider()
     try:
@@ -133,8 +148,9 @@ def backfill_daily_bars(
             if code_start > trade_date:
                 continue
             try:
-                df = provider.fetch_daily_bars(code, code_start, trade_date)
-                total_rows += store.persist_daily_bars(df, code)
+                df, source = provider.fetch_daily_bars(code, code_start, trade_date)
+                total_rows += store.persist_daily_bars(df, code, source="akshare")
+                store.record_fetch_run(trade_date, f"daily_bars:{code}:{source}", "success", None)
             except (DatabaseError, MarketDataError) as exc:
                 message = str(exc)
                 failures.append((code, message))
@@ -145,7 +161,9 @@ def backfill_daily_bars(
                 if stock_code:
                     raise
                 print(f"Skip {code}: {message}", file=sys.stderr)
+                sleep(max(request_sleep, 2.0))
                 continue
+            sleep(request_sleep)
             if index % 100 == 0:
                 print(f"Backfilled {index}/{len(codes)} stocks, rows={total_rows}, failures={len(failures)}.")
     except (DatabaseError, MarketDataError) as exc:

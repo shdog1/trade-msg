@@ -16,6 +16,7 @@ from src.database import (
     stock_basic_rows,
 )
 from src.models import Candidate
+from src.market_data import to_exchange_symbol
 
 
 class DatabaseTest(unittest.TestCase):
@@ -120,6 +121,36 @@ class DatabaseTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["code"], "600001")
         self.assertEqual(rows[0]["close_price"], 10.5)
+
+    def test_daily_bar_rows_normalizes_english_columns(self) -> None:
+        rows = daily_bar_rows(
+            pd.DataFrame(
+                [
+                    {
+                        "date": "2026-05-29",
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.5,
+                        "volume": 1000,
+                        "amount": 2000,
+                        "turnover": 3.2,
+                    }
+                ]
+            ),
+            "000001",
+            "akshare",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["code"], "000001")
+        self.assertEqual(rows[0]["close_price"], 10.5)
+
+    def test_exchange_symbol_for_fallback_sources(self) -> None:
+        self.assertEqual(to_exchange_symbol("600001"), "sh600001")
+        self.assertEqual(to_exchange_symbol("688001"), "sh688001")
+        self.assertEqual(to_exchange_symbol("000001"), "sz000001")
+        self.assertEqual(to_exchange_symbol("300001"), "sz300001")
 
 
 if __name__ == "__main__":

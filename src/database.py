@@ -88,6 +88,16 @@ class MySQLStore:
         with self.engine.begin() as conn:
             for statement in SCHEMA_SQL:
                 conn.execute(sqlalchemy.text(statement))
+            self._migrate_primary_keys_and_indexes(conn)
+
+    def _migrate_primary_keys_and_indexes(self, conn: Any) -> None:
+        for table, unique_columns in UNIQUE_KEY_COLUMNS.items():
+            ensure_surrogate_primary_key(conn, self.config.database, table, unique_columns)
+        for table, indexes in INDEX_COLUMNS.items():
+            for index_name, columns in indexes.items():
+                ensure_index(conn, self.config.database, table, index_name, columns, unique=False)
+        for table, columns in UNIQUE_KEY_COLUMNS.items():
+            ensure_index(conn, self.config.database, table, f"uk_{table}_business", sorted(columns), unique=True)
 
     def has_market_data(self, trade_date: date) -> bool:
         sqlalchemy = require_sqlalchemy()
@@ -281,11 +291,13 @@ class MySQLStore:
         if not rows:
             return
         sqlalchemy = require_sqlalchemy()
-        columns = list(rows[0].keys())
+        columns = [col for col in rows[0].keys() if col != "id"]
         update_columns = [col for col in columns if col not in UNIQUE_KEY_COLUMNS[table]]
         insert_cols = ", ".join(f"`{col}`" for col in columns)
         values_cols = ", ".join(f":{col}" for col in columns)
         update_clause = ", ".join(f"`{col}` = VALUES(`{col}`)" for col in update_columns)
+        if not update_clause:
+            update_clause = f"`{columns[0]}` = VALUES(`{columns[0]}`)"
         sql = (
             f"INSERT INTO `{table}` ({insert_cols}) VALUES ({values_cols}) "
             f"ON DUPLICATE KEY UPDATE {update_clause}"
@@ -315,14 +327,126 @@ def require_sqlalchemy():
     return sqlalchemy
 
 
+def has_column(conn: Any, database: str, table: str, column: str) -> bool:
+    sqlalchemy = require_sqlalchemy()
+    count = conn.execute(
+        sqlalchemy.text(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_schema = :database AND table_name = :table AND column_name = :column"
+        ),
+        {"database": database, "table": table, "column": column},
+    ).scalar_one()
+    return int(count) > 0
+
+
+def primary_key_columns(conn: Any, database: str, table: str) -> list[str]:
+    sqlalchemy = require_sqlalchemy()
+    rows = conn.execute(
+        sqlalchemy.text(
+            "SELECT column_name FROM information_schema.statistics "
+            "WHERE table_schema = :database AND table_name = :table AND index_name = 'PRIMARY' "
+            "ORDER BY seq_in_index"
+        ),
+        {"database": database, "table": table},
+    ).all()
+    return [row[0] for row in rows]
+
+
+def has_index(conn: Any, database: str, table: str, index_name: str) -> bool:
+    sqlalchemy = require_sqlalchemy()
+    count = conn.execute(
+        sqlalchemy.text(
+            "SELECT COUNT(*) FROM information_schema.statistics "
+            "WHERE table_schema = :database AND table_name = :table AND index_name = :index_name"
+        ),
+        {"database": database, "table": table, "index_name": index_name},
+    ).scalar_one()
+    return int(count) > 0
+
+
+def ensure_surrogate_primary_key(conn: Any, database: str, table: str, business_columns: list[str]) -> None:
+    sqlalchemy = require_sqlalchemy()
+    pk_columns = primary_key_columns(conn, database, table)
+    if pk_columns == ["id"]:
+        ensure_index(conn, database, table, f"uk_{table}_business", business_columns, unique=True)
+        return
+
+    if pk_columns:
+        conn.execute(sqlalchemy.text(f"ALTER TABLE `{table}` DROP PRIMARY KEY"))
+
+    if has_column(conn, database, table, "id"):
+        conn.execute(sqlalchemy.text(f"ALTER TABLE `{table}` MODIFY COLUMN `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY"))
+    else:
+        conn.execute(sqlalchemy.text(f"ALTER TABLE `{table}` ADD COLUMN `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST"))
+
+    ensure_index(conn, database, table, f"uk_{table}_business", business_columns, unique=True)
+
+
+def ensure_index(conn: Any, database: str, table: str, index_name: str, columns: list[str], unique: bool) -> None:
+    if has_index(conn, database, table, index_name):
+        return
+    sqlalchemy = require_sqlalchemy()
+    unique_sql = "UNIQUE " if unique else ""
+    column_sql = ", ".join(f"`{column}`" for column in columns)
+    conn.execute(sqlalchemy.text(f"CREATE {unique_sql}INDEX `{index_name}` ON `{table}` ({column_sql})"))
+
+
 UNIQUE_KEY_COLUMNS = {
-    "market_quotes": {"trade_date", "code", "source"},
-    "index_quotes": {"trade_date", "name", "source"},
-    "limit_pool": {"trade_date", "code", "source"},
-    "hot_ranks": {"trade_date", "code", "source"},
-    "hot_topics": {"trade_date", "topic_type", "name", "source"},
-    "recap_candidates": {"trade_date", "code"},
-    "recap_reports": {"trade_date"},
+    "stock_basic": ["code"],
+    "market_quotes": ["trade_date", "code", "source"],
+    "daily_bars": ["trade_date", "code", "source"],
+    "index_quotes": ["trade_date", "name", "source"],
+    "limit_pool": ["trade_date", "code", "source"],
+    "hot_ranks": ["trade_date", "code", "source"],
+    "hot_topics": ["trade_date", "topic_type", "name", "source"],
+    "recap_candidates": ["trade_date", "code"],
+    "recap_reports": ["trade_date"],
+}
+
+
+INDEX_COLUMNS = {
+    "fetch_runs": {
+        "idx_fetch_runs_trade_source_status": ["trade_date", "source", "status"],
+        "idx_fetch_runs_created_at": ["created_at"],
+    },
+    "stock_basic": {
+        "idx_stock_basic_is_main_board": ["is_main_board"],
+        "idx_stock_basic_is_st": ["is_st"],
+        "idx_stock_basic_market": ["market"],
+    },
+    "market_quotes": {
+        "idx_market_quotes_trade_date": ["trade_date"],
+        "idx_market_quotes_code": ["code"],
+        "idx_market_quotes_trade_turnover": ["trade_date", "turnover"],
+        "idx_market_quotes_trade_change": ["trade_date", "change_pct"],
+    },
+    "daily_bars": {
+        "idx_daily_bars_code_trade": ["code", "trade_date"],
+        "idx_daily_bars_trade_date": ["trade_date"],
+        "idx_daily_bars_trade_turnover": ["trade_date", "turnover"],
+    },
+    "index_quotes": {
+        "idx_index_quotes_trade_date": ["trade_date"],
+    },
+    "limit_pool": {
+        "idx_limit_pool_trade_days": ["trade_date", "limit_up_days"],
+        "idx_limit_pool_code_trade": ["code", "trade_date"],
+    },
+    "hot_ranks": {
+        "idx_hot_ranks_trade_rank": ["trade_date", "hot_rank"],
+        "idx_hot_ranks_code_trade": ["code", "trade_date"],
+    },
+    "hot_topics": {
+        "idx_hot_topics_trade_type_change": ["trade_date", "topic_type", "change_pct"],
+    },
+    "recap_candidates": {
+        "idx_recap_candidates_trade_score": ["trade_date", "score"],
+        "idx_recap_candidates_code_trade": ["code", "trade_date"],
+    },
+    "recap_reports": {
+        "idx_recap_reports_send_status": ["send_status"],
+        "idx_recap_reports_generated_at": ["generated_at"],
+    },
 }
 
 
@@ -336,11 +460,32 @@ SCHEMA_SQL = [
         error TEXT NULL,
         started_at DATETIME NOT NULL,
         finished_at DATETIME NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_fetch_runs_trade_source_status (trade_date, source, status),
+        KEY idx_fetch_runs_created_at (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS stock_basic (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        code VARCHAR(16) NOT NULL,
+        name VARCHAR(64) NOT NULL,
+        market VARCHAR(32) NULL,
+        exchange VARCHAR(16) NULL,
+        is_main_board TINYINT(1) NOT NULL DEFAULT 0,
+        is_st TINYINT(1) NOT NULL DEFAULT 0,
+        listing_status VARCHAR(32) NULL,
+        source VARCHAR(32) NOT NULL DEFAULT 'akshare',
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_stock_basic_business (code),
+        KEY idx_stock_basic_is_main_board (is_main_board),
+        KEY idx_stock_basic_is_st (is_st),
+        KEY idx_stock_basic_market (market)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
     CREATE TABLE IF NOT EXISTS market_quotes (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
         trade_date DATE NOT NULL,
         code VARCHAR(16) NOT NULL,
         name VARCHAR(64) NOT NULL,
@@ -352,42 +497,78 @@ SCHEMA_SQL = [
         amplitude_pct DOUBLE NULL,
         source VARCHAR(32) NOT NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        PRIMARY KEY (trade_date, code, source)
+        UNIQUE KEY uk_market_quotes_business (trade_date, code, source),
+        KEY idx_market_quotes_trade_date (trade_date),
+        KEY idx_market_quotes_code (code),
+        KEY idx_market_quotes_trade_turnover (trade_date, turnover),
+        KEY idx_market_quotes_trade_change (trade_date, change_pct)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS daily_bars (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        trade_date DATE NOT NULL,
+        code VARCHAR(16) NOT NULL,
+        name VARCHAR(64) NULL,
+        open_price DOUBLE NULL,
+        high_price DOUBLE NULL,
+        low_price DOUBLE NULL,
+        close_price DOUBLE NULL,
+        change_pct DOUBLE NULL,
+        volume DOUBLE NULL,
+        turnover DOUBLE NULL,
+        turnover_rate DOUBLE NULL,
+        amplitude_pct DOUBLE NULL,
+        source VARCHAR(32) NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_daily_bars_business (trade_date, code, source),
+        KEY idx_daily_bars_code_trade (code, trade_date),
+        KEY idx_daily_bars_trade_date (trade_date),
+        KEY idx_daily_bars_trade_turnover (trade_date, turnover)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
     CREATE TABLE IF NOT EXISTS index_quotes (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
         trade_date DATE NOT NULL,
         name VARCHAR(64) NOT NULL,
         close_price DOUBLE NULL,
         change_pct DOUBLE NULL,
         source VARCHAR(32) NOT NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        PRIMARY KEY (trade_date, name, source)
+        UNIQUE KEY uk_index_quotes_business (trade_date, name, source),
+        KEY idx_index_quotes_trade_date (trade_date)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
     CREATE TABLE IF NOT EXISTS limit_pool (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
         trade_date DATE NOT NULL,
         code VARCHAR(16) NOT NULL,
         limit_up_days INT NULL,
         source VARCHAR(32) NOT NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        PRIMARY KEY (trade_date, code, source)
+        UNIQUE KEY uk_limit_pool_business (trade_date, code, source),
+        KEY idx_limit_pool_trade_days (trade_date, limit_up_days),
+        KEY idx_limit_pool_code_trade (code, trade_date)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
     CREATE TABLE IF NOT EXISTS hot_ranks (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
         trade_date DATE NOT NULL,
         code VARCHAR(16) NOT NULL,
         hot_rank INT NULL,
         source VARCHAR(32) NOT NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        PRIMARY KEY (trade_date, code, source)
+        UNIQUE KEY uk_hot_ranks_business (trade_date, code, source),
+        KEY idx_hot_ranks_trade_rank (trade_date, hot_rank),
+        KEY idx_hot_ranks_code_trade (code, trade_date)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
     CREATE TABLE IF NOT EXISTS hot_topics (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
         trade_date DATE NOT NULL,
         topic_type VARCHAR(16) NOT NULL,
         name VARCHAR(128) NOT NULL,
@@ -395,11 +576,13 @@ SCHEMA_SQL = [
         turnover DOUBLE NULL,
         source VARCHAR(32) NOT NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        PRIMARY KEY (trade_date, topic_type, name, source)
+        UNIQUE KEY uk_hot_topics_business (trade_date, topic_type, name, source),
+        KEY idx_hot_topics_trade_type_change (trade_date, topic_type, change_pct)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
     CREATE TABLE IF NOT EXISTS recap_candidates (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
         trade_date DATE NOT NULL,
         code VARCHAR(16) NOT NULL,
         name VARCHAR(64) NOT NULL,
@@ -410,12 +593,15 @@ SCHEMA_SQL = [
         reasons JSON NOT NULL,
         score_parts JSON NOT NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        PRIMARY KEY (trade_date, code)
+        UNIQUE KEY uk_recap_candidates_business (trade_date, code),
+        KEY idx_recap_candidates_trade_score (trade_date, score),
+        KEY idx_recap_candidates_code_trade (code, trade_date)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
     CREATE TABLE IF NOT EXISTS recap_reports (
-        trade_date DATE PRIMARY KEY,
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        trade_date DATE NOT NULL,
         title VARCHAR(255) NOT NULL,
         html_path VARCHAR(512) NOT NULL,
         text_path VARCHAR(512) NOT NULL,
@@ -423,7 +609,10 @@ SCHEMA_SQL = [
         send_status VARCHAR(32) NOT NULL,
         sent_at DATETIME NULL,
         send_error TEXT NULL,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_recap_reports_business (trade_date),
+        KEY idx_recap_reports_send_status (send_status),
+        KEY idx_recap_reports_generated_at (generated_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
 ]

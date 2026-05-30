@@ -32,7 +32,7 @@ class MarketData:
 class AkshareMarketProvider:
     """Fetches public A-share market data through AKShare."""
 
-    def fetch(self, config: dict[str, Any] | None = None) -> MarketData:
+    def fetch(self, config: dict[str, Any] | None = None, trade_date: date | None = None) -> MarketData:
         with bypass_proxy_for_data():
             try:
                 import akshare as ak
@@ -42,7 +42,7 @@ class AkshareMarketProvider:
                 ) from exc
 
             warnings: list[str] = []
-            trade_date = resolve_trade_date_from_config(config or {})
+            trade_date = trade_date or resolve_trade_date_from_config(config or {})
             spot = self._fetch_spot(ak, warnings)
 
             hot_rank = self._optional_call(ak, "stock_hot_rank_em", warnings)

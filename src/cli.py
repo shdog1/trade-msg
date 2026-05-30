@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from .analysis import build_recap
 from .config import Settings, load_settings
+from .database import DatabaseError, MySQLStore
 from .market_data import AkshareMarketProvider, MarketDataError
 from .email_notifier import EmailNotifier, NotifyError
 from .report import render_report
+from .trading_calendar import resolve_trade_date_from_config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -17,6 +19,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default=None, help="Path to config.yaml.")
     parser.add_argument("--dry-run", action="store_true", help="Write report locally without sending.")
     parser.add_argument("--send", action="store_true", help="Send report by email.")
+    parser.add_argument("--fetch-only", action="store_true", help="Fetch market data into MySQL without rendering.")
+    parser.add_argument("--date", default=None, help="Trade date to recap, e.g. 2026-05-29.")
     parser.add_argument("--test-email", action="store_true", help="Send a test email without fetching data.")
     args = parser.parse_args(argv)
 
@@ -24,15 +28,28 @@ def main(argv: list[str] | None = None) -> int:
     if args.test_email:
         return send_test_email(settings.push_title_prefix)
 
-    if not args.dry_run and not args.send:
+    if not args.dry_run and not args.send and not args.fetch_only:
         args.dry_run = True
 
+    trade_date = parse_trade_date(args.date) if args.date else resolve_trade_date_from_config(settings.raw)
     try:
-        data = AkshareMarketProvider().fetch(settings.raw)
+        store = MySQLStore.from_env(settings.raw)
+        store.initialize()
+    except DatabaseError as exc:
+        print(f"Failed to initialize MySQL: {exc}", file=sys.stderr)
+        return 4
+
+    if args.fetch_only:
+        return fetch_into_database(store, settings, trade_date)
+
+    try:
+        ensure_market_data(store, settings, trade_date)
+        data = store.load_market_data(trade_date)
         recap = build_recap(data, settings.raw)
+        store.persist_recap(recap)
         title, html, text = render_report(recap, settings.push_title_prefix)
         report_date = recap.market.trade_date.isoformat()
-    except (MarketDataError, ValueError) as exc:
+    except (DatabaseError, MarketDataError, ValueError) as exc:
         if args.send:
             cached = load_recent_cached_report(settings)
             if cached:
@@ -46,19 +63,50 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Failed to build recap: {exc}", file=sys.stderr)
             return 2
 
-    if args.dry_run:
+    if args.dry_run or args.send:
         output = write_report_files(settings, html, text, report_date)
+        store.record_report(trade_date, title, str(output), str(settings.dated_text_output(report_date)), "generated")
+
+    if args.dry_run:
         print(f"Wrote dry-run report to {output}")
 
     if args.send:
         try:
             EmailNotifier.from_env().send(title=title, text_content=text, html_content=html)
         except NotifyError as exc:
+            store.mark_report_sent(trade_date, "failed", str(exc))
             print(f"Failed to send email message: {exc}", file=sys.stderr)
             return 3
+        store.mark_report_sent(trade_date, "sent", None)
         print("Email message sent.")
 
     return 0
+
+
+def parse_trade_date(value: str) -> date:
+    return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def fetch_into_database(store: MySQLStore, settings: Settings, trade_date: date) -> int:
+    try:
+        data = AkshareMarketProvider().fetch(settings.raw, trade_date=trade_date)
+        store.persist_market_data(data)
+    except (DatabaseError, MarketDataError) as exc:
+        try:
+            store.record_fetch_run(trade_date, "akshare", "failed", str(exc))
+        except DatabaseError:
+            pass
+        print(f"Failed to fetch market data into MySQL: {exc}", file=sys.stderr)
+        return 2
+    print(f"Fetched market data into MySQL for {trade_date.isoformat()}.")
+    return 0
+
+
+def ensure_market_data(store: MySQLStore, settings: Settings, trade_date: date) -> None:
+    if store.has_market_data(trade_date):
+        return
+    data = AkshareMarketProvider().fetch(settings.raw, trade_date=trade_date)
+    store.persist_market_data(data)
 
 
 def load_recent_cached_report(settings: Settings) -> tuple[str, str, str] | None:

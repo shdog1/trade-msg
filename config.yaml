@@ -34,3 +34,7 @@ notify:
   channel: email
   title_prefix: "A-share short-term recap"
   cache_max_age_hours: 18
+
+database:
+  engine: mysql
+  auto_create_database: true

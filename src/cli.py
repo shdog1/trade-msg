@@ -126,19 +126,36 @@ def backfill_daily_bars(
             codes = [stock_code] if stock_code else store.list_stock_codes(main_board_only=False)
         start_date = trade_date - timedelta(days=max(days * 2, days + 30))
         total_rows = 0
+        failures: list[tuple[str, str]] = []
         for index, code in enumerate(codes, start=1):
             latest = store.latest_daily_bar_date(code)
             code_start = latest + timedelta(days=1) if latest else start_date
             if code_start > trade_date:
                 continue
-            df = provider.fetch_daily_bars(code, code_start, trade_date)
-            total_rows += store.persist_daily_bars(df, code)
+            try:
+                df = provider.fetch_daily_bars(code, code_start, trade_date)
+                total_rows += store.persist_daily_bars(df, code)
+            except (DatabaseError, MarketDataError) as exc:
+                message = str(exc)
+                failures.append((code, message))
+                try:
+                    store.record_fetch_run(trade_date, f"daily_bars:{code}", "failed", message)
+                except DatabaseError:
+                    pass
+                if stock_code:
+                    raise
+                print(f"Skip {code}: {message}", file=sys.stderr)
+                continue
             if index % 100 == 0:
-                print(f"Backfilled {index}/{len(codes)} stocks, rows={total_rows}.")
+                print(f"Backfilled {index}/{len(codes)} stocks, rows={total_rows}, failures={len(failures)}.")
     except (DatabaseError, MarketDataError) as exc:
         print(f"Failed to backfill daily bars: {exc}", file=sys.stderr)
         return 2
-    print(f"Backfilled daily bars for {len(codes)} stocks, rows={total_rows}.")
+    print(f"Backfilled daily bars for {len(codes)} stocks, rows={total_rows}, failures={len(failures)}.")
+    if failures:
+        print("Failed stocks: " + ", ".join(code for code, _ in failures[:30]), file=sys.stderr)
+        if len(failures) > 30:
+            print(f"... and {len(failures) - 30} more failures.", file=sys.stderr)
     return 0
 
 

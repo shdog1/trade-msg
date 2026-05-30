@@ -80,16 +80,21 @@ class AkshareMarketProvider:
                 raise MarketDataError(
                     "AKShare is not installed. Run `pip install -r requirements.txt` first."
                 ) from exc
-            try:
-                return ak.stock_zh_a_hist(
-                    symbol=code,
-                    period="daily",
-                    start_date=start_date.strftime("%Y%m%d"),
-                    end_date=end_date.strftime("%Y%m%d"),
-                    adjust="",
-                )
-            except Exception as exc:  # noqa: BLE001
-                raise MarketDataError(f"Failed to fetch daily bars for {code}: {exc}") from exc
+            last_error: Exception | None = None
+            for attempt in range(1, 4):
+                try:
+                    return ak.stock_zh_a_hist(
+                        symbol=code,
+                        period="daily",
+                        start_date=start_date.strftime("%Y%m%d"),
+                        end_date=end_date.strftime("%Y%m%d"),
+                        adjust="",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    if attempt < 3:
+                        sleep(2)
+            raise MarketDataError(f"Failed to fetch daily bars for {code}: {last_error}")
 
     def _fetch_spot(self, ak: Any, warnings: list[str]) -> pd.DataFrame:
         sources = [

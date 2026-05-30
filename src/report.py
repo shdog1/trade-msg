@@ -171,6 +171,7 @@ def render_text(recap: Recap, title: str) -> str:
         lines.append(
             f"- {item.code} {item.name}: {item.score}% | {'/'.join(item.strategy_tags)} | {item.trigger}"
         )
+        lines.append(f"  依据: {'; '.join(item.reasons)}")
     return "\n".join(lines) + "\n"
 
 
@@ -180,4 +181,3 @@ def fmt_num(value: float | None) -> str:
 
 def fmt_pct(value: float | None) -> str:
     return "-" if value is None else f"{value:.2f}%"
-

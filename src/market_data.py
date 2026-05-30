@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from time import sleep
 from typing import Any
@@ -27,6 +27,7 @@ class MarketData:
     concepts: pd.DataFrame
     trade_date: date
     warnings: list[str]
+    daily_bars: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 class AkshareMarketProvider:

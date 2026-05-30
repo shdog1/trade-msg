@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -241,6 +241,12 @@ class MySQLStore:
             "SELECT name, change_pct, turnover FROM hot_topics WHERE trade_date = :trade_date AND topic_type = 'concept'",
             {"trade_date": trade_date},
         )
+        daily_bars = self._read_df(
+            "SELECT trade_date, code, name, open_price AS open, high_price AS high, low_price AS low, "
+            "close_price AS close, change_pct, turnover, turnover_rate, amplitude_pct "
+            "FROM daily_bars WHERE trade_date BETWEEN :start_date AND :trade_date ORDER BY code, trade_date",
+            {"start_date": trade_date - timedelta(days=120), "trade_date": trade_date},
+        )
         return MarketData(
             spot=spot,
             hot_rank=hot_rank,
@@ -250,6 +256,7 @@ class MySQLStore:
             concepts=concepts,
             trade_date=trade_date,
             warnings=[],
+            daily_bars=daily_bars,
         )
 
     def persist_recap(self, recap: Recap) -> None:

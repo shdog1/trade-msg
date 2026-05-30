@@ -1,16 +1,16 @@
 # trade-msg
 
-A 股短线复盘提醒工具。每天收盘后自动获取行情数据，写入本地 MySQL，生成简洁中文复盘，并通过邮件推送到手机。
+A 股短线复盘提醒工具。每天收盘后采集行情，写入本地 MySQL，生成简洁中文复盘报告，并通过邮件推送到手机。
 
-> 仅用于复盘研究，不构成投资建议。
+> 仅用于复盘研究。推荐值代表观察优先级，不构成投资建议。
 
 ## 主要功能
 
-- 市场概览：指数、涨跌家数、涨停/跌停、成交额、市场情绪。
+- 市场概览：指数、上涨/下跌家数、涨停/跌停、成交额、市场情绪。
 - 热点与龙头：涨停池、连板高度、人气榜、行业/概念热度。
 - 短线机会：按“龙头反弹、龙头低吸、龙头二波”分类输出候选股。
-- 候选股信息：代码、名称、策略标签、推荐值、入场观察条件、失效条件、核心依据。
-- 数据入库：行情、指数、涨停池、人气榜、行业/概念热度、候选评分、报告发送状态写入 MySQL。
+- 历史 K 线评分：结合近 5/10/20/60 日走势、前高回撤、均线状态、成交额变化。
+- 数据入库：行情、指数、涨停池、人气榜、板块热度、历史日 K、候选评分、报告发送记录写入 MySQL。
 - 报告归档：按交易日期保存 HTML 和 TXT 文件。
 
 ## 快速开始
@@ -22,9 +22,7 @@ Copy-Item .env.example .env
 notepad .env
 ```
 
-在 `.env` 中填写邮箱 SMTP 信息。`SMTP_PASSWORD` 通常是邮箱授权码，不是登录密码。
-
-同时填写 MySQL 信息：
+在 `.env` 填写邮箱 SMTP 和 MySQL 信息。`SMTP_PASSWORD` 通常是邮箱授权码，不是登录密码。
 
 ```env
 MYSQL_HOST=127.0.0.1
@@ -37,28 +35,28 @@ MYSQL_CHARSET=utf8mb4
 
 ## 常用命令
 
-生成本地复盘，不发送邮件：
-
-```powershell
-python -m src.cli --dry-run
-```
-
-只采集行情并写入 MySQL：
+采集当天复盘数据并写入 MySQL：
 
 ```powershell
 python -m src.cli --fetch-only
 ```
 
-补最近 250 天历史日 K：
+回补最近 250 天历史日 K：
 
 ```powershell
-python -m src.cli --backfill-days 250
+python -m src.cli --backfill-days 250 --backfill-sleep 1.5
 ```
 
-补单只股票历史日 K：
+回补单只股票历史日 K：
 
 ```powershell
-python -m src.cli --backfill-days 250 --backfill-stock 600001
+python -m src.cli --backfill-days 250 --backfill-stock 600001 --backfill-sleep 1.5
+```
+
+生成本地复盘，不发邮件：
+
+```powershell
+python -m src.cli --dry-run
 ```
 
 发送复盘邮件：
@@ -85,6 +83,32 @@ python -m src.cli --test-email
 powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_task.ps1
 ```
 
+## 分析依据
+
+候选股评分为 100 分制：
+
+- 市场环境：15 分，看上涨占比、涨停数、平均涨跌幅。
+- 龙头强度：25 分，看人气排名、连板/涨停强度、成交额。
+- 历史形态：30 分，看近 20/60 日涨幅、前高回撤、均线位置、是否二波突破。
+- 当日确认：20 分，看当日涨跌幅、量比、振幅、策略标签。
+- 流动性：10 分，看成交额。
+
+如果某只股票历史 K 线不足，系统会保留当日强度兜底，但报告会标记“历史样本不足，按当日强度兜底”。
+
+## 数据表
+
+- `stock_basic`：股票基础资料。
+- `market_quotes`：每日收盘复盘行情快照。
+- `quote_snapshots`：实时行情采集快照。
+- `daily_bars`：历史日 K，用于短线形态分析。
+- `index_quotes`：指数行情。
+- `limit_pool`：涨停池和连板数据。
+- `hot_ranks`：人气排名。
+- `hot_topics`：行业/概念热度。
+- `recap_candidates`：候选股评分结果。
+- `recap_reports`：报告生成和发送状态。
+- `fetch_runs`：采集任务日志。
+
 ## 输出文件
 
 ```text
@@ -95,13 +119,6 @@ reports/YYYY-MM-DD/recap.txt
 ```
 
 报告日期按最近可用交易日计算：每天 09:00 前使用上一个交易日；周末和节假日自动回退到最近交易日。
-
-## 配置
-
-- `config.yaml`：复盘规则、候选数量、报告时间、交易日分界时间。
-- `.env`：邮箱账号、授权码、收件人等私密配置，不会提交到 Git。
-- MySQL 默认数据库：`trade_msg`，首次运行会自动建库建表。
-- 核心数据表：`stock_basic`、`market_quotes`、`quote_snapshots`、`daily_bars`、`index_quotes`、`limit_pool`、`hot_ranks`、`hot_topics`。
 
 ## 测试
 

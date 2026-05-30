@@ -10,6 +10,7 @@ from urllib.parse import quote_plus
 import pandas as pd
 
 from .analysis import (
+    normalize_stock_code,
     normalize_hot_rank,
     normalize_indexes,
     normalize_limit_pool,
@@ -97,7 +98,7 @@ class MySQLStore:
             for index_name, columns in indexes.items():
                 ensure_index(conn, self.config.database, table, index_name, columns, unique=False)
         for table, columns in UNIQUE_KEY_COLUMNS.items():
-            ensure_index(conn, self.config.database, table, f"uk_{table}_business", sorted(columns), unique=True)
+            ensure_index(conn, self.config.database, table, f"uk_{table}_business", columns, unique=True)
 
     def has_market_data(self, trade_date: date) -> bool:
         sqlalchemy = require_sqlalchemy()
@@ -174,12 +175,44 @@ class MySQLStore:
             ]
 
             self._upsert_many(conn, "market_quotes", market_rows)
+            self._upsert_many(conn, "quote_snapshots", quote_snapshot_rows(market_rows))
             self._upsert_many(conn, "hot_ranks", hot_rank_rows)
             self._upsert_many(conn, "limit_pool", limit_rows)
             self._upsert_many(conn, "index_quotes", index_rows)
             self._upsert_many(conn, "hot_topics", topic_rows)
 
         self.record_fetch_run(data.trade_date, "akshare", "success", None)
+
+    def persist_stock_basic(self, df: pd.DataFrame, fallback_spot: pd.DataFrame | None = None) -> None:
+        self.initialize()
+        rows = stock_basic_rows(df)
+        if not rows and fallback_spot is not None:
+            rows = stock_basic_rows_from_spot(fallback_spot)
+        with self.engine.begin() as conn:
+            self._upsert_many(conn, "stock_basic", rows)
+
+    def list_stock_codes(self, main_board_only: bool = True) -> list[str]:
+        where = "WHERE is_main_board = 1" if main_board_only else ""
+        df = self._read_df(f"SELECT code FROM stock_basic {where} ORDER BY code", {})
+        if df.empty:
+            return []
+        return [str(item) for item in df["code"].dropna().tolist()]
+
+    def latest_daily_bar_date(self, code: str) -> date | None:
+        sqlalchemy = require_sqlalchemy()
+        with self.engine.begin() as conn:
+            value = conn.execute(
+                sqlalchemy.text("SELECT MAX(trade_date) FROM daily_bars WHERE code = :code"),
+                {"code": code},
+            ).scalar_one_or_none()
+        return value
+
+    def persist_daily_bars(self, df: pd.DataFrame, code: str, source: str = "akshare") -> int:
+        self.initialize()
+        rows = daily_bar_rows(df, code, source)
+        with self.engine.begin() as conn:
+            self._upsert_many(conn, "daily_bars", rows)
+        return len(rows)
 
     def load_market_data(self, trade_date: date) -> MarketData:
         self.initialize()
@@ -319,6 +352,147 @@ def candidate_to_row(trade_date: date, candidate: Candidate) -> dict[str, Any]:
     }
 
 
+def stock_basic_rows(df: pd.DataFrame) -> list[dict[str, Any]]:
+    if df.empty:
+        return []
+    code_col = first_existing(df, ["code", "symbol", "\u4ee3\u7801", "\u80a1\u7968\u4ee3\u7801"])
+    name_col = first_existing(df, ["name", "\u540d\u79f0", "\u80a1\u7968\u7b80\u79f0"])
+    if not code_col or not name_col:
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in df.to_dict("records"):
+        code = normalize_stock_code(item.get(code_col))
+        if not code:
+            continue
+        name = str(item.get(name_col, ""))
+        rows.append(stock_basic_row(code, name))
+    return rows
+
+
+def stock_basic_rows_from_spot(df: pd.DataFrame) -> list[dict[str, Any]]:
+    if df.empty:
+        return []
+    spot = normalize_spot(df)
+    return [stock_basic_row(row.code, row.name) for row in spot.itertuples()]
+
+
+def stock_basic_row(code: str, name: str) -> dict[str, Any]:
+    market = infer_market(code)
+    return {
+        "code": code,
+        "name": name,
+        "market": market,
+        "exchange": infer_exchange(code),
+        "is_main_board": 1 if is_main_board_code(code) else 0,
+        "is_st": 1 if "ST" in name.upper() else 0,
+        "listing_status": "listed",
+        "source": "akshare",
+    }
+
+
+def quote_snapshot_rows(market_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fetched_at = datetime.now()
+    return [
+        {
+            "trade_date": row["trade_date"],
+            "code": row["code"],
+            "name": row["name"],
+            "close_price": row["close_price"],
+            "change_pct": row["change_pct"],
+            "turnover": row["turnover"],
+            "turnover_rate": row["turnover_rate"],
+            "volume_ratio": row["volume_ratio"],
+            "amplitude_pct": row["amplitude_pct"],
+            "source": row["source"],
+            "fetched_at": fetched_at,
+        }
+        for row in market_rows
+    ]
+
+
+def daily_bar_rows(df: pd.DataFrame, code: str, source: str) -> list[dict[str, Any]]:
+    if df.empty:
+        return []
+    aliases = {
+        "trade_date": ["\u65e5\u671f", "date", "trade_date"],
+        "name": ["\u540d\u79f0", "name"],
+        "open_price": ["\u5f00\u76d8", "open"],
+        "high_price": ["\u6700\u9ad8", "high"],
+        "low_price": ["\u6700\u4f4e", "low"],
+        "close_price": ["\u6536\u76d8", "close"],
+        "change_pct": ["\u6da8\u8dcc\u5e45", "change_pct"],
+        "volume": ["\u6210\u4ea4\u91cf", "volume"],
+        "turnover": ["\u6210\u4ea4\u989d", "amount", "turnover"],
+        "amplitude_pct": ["\u632f\u5e45", "amplitude"],
+        "turnover_rate": ["\u6362\u624b\u7387", "turnover_rate"],
+    }
+    columns = {target: first_existing(df, names) for target, names in aliases.items()}
+    if not columns["trade_date"]:
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in df.to_dict("records"):
+        parsed_date = pd.to_datetime(item.get(columns["trade_date"]), errors="coerce")
+        if pd.isna(parsed_date):
+            continue
+        rows.append(
+            {
+                "trade_date": parsed_date.date(),
+                "code": code,
+                "name": str(item.get(columns["name"], "")) if columns["name"] else None,
+                "open_price": optional_float(item.get(columns["open_price"])) if columns["open_price"] else None,
+                "high_price": optional_float(item.get(columns["high_price"])) if columns["high_price"] else None,
+                "low_price": optional_float(item.get(columns["low_price"])) if columns["low_price"] else None,
+                "close_price": optional_float(item.get(columns["close_price"])) if columns["close_price"] else None,
+                "change_pct": optional_float(item.get(columns["change_pct"])) if columns["change_pct"] else None,
+                "volume": optional_float(item.get(columns["volume"])) if columns["volume"] else None,
+                "turnover": optional_float(item.get(columns["turnover"])) if columns["turnover"] else None,
+                "turnover_rate": optional_float(item.get(columns["turnover_rate"])) if columns["turnover_rate"] else None,
+                "amplitude_pct": optional_float(item.get(columns["amplitude_pct"])) if columns["amplitude_pct"] else None,
+                "source": source,
+            }
+        )
+    return rows
+
+
+def first_existing(df: pd.DataFrame, names: list[str]) -> str | None:
+    return next((name for name in names if name in df.columns), None)
+
+
+def optional_float(value: Any) -> float | None:
+    try:
+        if pd.isna(value):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def infer_exchange(code: str) -> str:
+    if code.startswith(("600", "601", "603", "605", "688")):
+        return "SH"
+    if code.startswith(("000", "001", "002", "003", "300")):
+        return "SZ"
+    if code.startswith(("8", "4", "9")):
+        return "BJ"
+    return ""
+
+
+def infer_market(code: str) -> str:
+    if code.startswith(("600", "601", "603", "605", "000", "001", "002", "003")):
+        return "main_board"
+    if code.startswith("300"):
+        return "chinext"
+    if code.startswith("688"):
+        return "star"
+    if code.startswith(("8", "4", "9")):
+        return "beijing"
+    return "unknown"
+
+
+def is_main_board_code(code: str) -> bool:
+    return code.startswith(("600", "601", "603", "605", "000", "001", "002", "003"))
+
+
 def require_sqlalchemy():
     try:
         import sqlalchemy
@@ -394,6 +568,7 @@ def ensure_index(conn: Any, database: str, table: str, index_name: str, columns:
 UNIQUE_KEY_COLUMNS = {
     "stock_basic": ["code"],
     "market_quotes": ["trade_date", "code", "source"],
+    "quote_snapshots": ["trade_date", "code", "source", "fetched_at"],
     "daily_bars": ["trade_date", "code", "source"],
     "index_quotes": ["trade_date", "name", "source"],
     "limit_pool": ["trade_date", "code", "source"],
@@ -419,6 +594,10 @@ INDEX_COLUMNS = {
         "idx_market_quotes_code": ["code"],
         "idx_market_quotes_trade_turnover": ["trade_date", "turnover"],
         "idx_market_quotes_trade_change": ["trade_date", "change_pct"],
+    },
+    "quote_snapshots": {
+        "idx_quote_snapshots_code_time": ["code", "fetched_at"],
+        "idx_quote_snapshots_trade_time": ["trade_date", "fetched_at"],
     },
     "daily_bars": {
         "idx_daily_bars_code_trade": ["code", "trade_date"],
@@ -502,6 +681,26 @@ SCHEMA_SQL = [
         KEY idx_market_quotes_code (code),
         KEY idx_market_quotes_trade_turnover (trade_date, turnover),
         KEY idx_market_quotes_trade_change (trade_date, change_pct)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS quote_snapshots (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        trade_date DATE NOT NULL,
+        code VARCHAR(16) NOT NULL,
+        name VARCHAR(64) NOT NULL,
+        close_price DOUBLE NULL,
+        change_pct DOUBLE NULL,
+        turnover DOUBLE NULL,
+        turnover_rate DOUBLE NULL,
+        volume_ratio DOUBLE NULL,
+        amplitude_pct DOUBLE NULL,
+        source VARCHAR(32) NOT NULL,
+        fetched_at DATETIME NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_quote_snapshots_business (trade_date, code, source, fetched_at),
+        KEY idx_quote_snapshots_code_time (code, fetched_at),
+        KEY idx_quote_snapshots_trade_time (trade_date, fetched_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """

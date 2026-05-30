@@ -4,7 +4,17 @@ import os
 import unittest
 from unittest.mock import patch
 
-from src.database import INDEX_COLUMNS, SCHEMA_SQL, UNIQUE_KEY_COLUMNS, MySQLConfig, candidate_to_row
+import pandas as pd
+
+from src.database import (
+    INDEX_COLUMNS,
+    SCHEMA_SQL,
+    UNIQUE_KEY_COLUMNS,
+    MySQLConfig,
+    candidate_to_row,
+    daily_bar_rows,
+    stock_basic_rows,
+)
 from src.models import Candidate
 
 
@@ -68,6 +78,48 @@ class DatabaseTest(unittest.TestCase):
         for indexes in INDEX_COLUMNS.values():
             for index_name in indexes:
                 self.assertIn(index_name, schema)
+
+    def test_stock_basic_rows_marks_main_board_and_st(self) -> None:
+        rows = stock_basic_rows(
+            pd.DataFrame(
+                [
+                    {"code": "600001", "name": "样本A"},
+                    {"code": "300001", "name": "创业A"},
+                    {"code": "000001", "name": "ST样本"},
+                ]
+            )
+        )
+
+        by_code = {row["code"]: row for row in rows}
+        self.assertEqual(by_code["600001"]["is_main_board"], 1)
+        self.assertEqual(by_code["300001"]["is_main_board"], 0)
+        self.assertEqual(by_code["000001"]["is_st"], 1)
+
+    def test_daily_bar_rows_normalizes_hist_columns(self) -> None:
+        rows = daily_bar_rows(
+            pd.DataFrame(
+                [
+                    {
+                        "日期": "2026-05-29",
+                        "开盘": 10,
+                        "最高": 11,
+                        "最低": 9,
+                        "收盘": 10.5,
+                        "涨跌幅": 2.1,
+                        "成交量": 1000,
+                        "成交额": 2000,
+                        "换手率": 3.2,
+                        "振幅": 4.1,
+                    }
+                ]
+            ),
+            "600001",
+            "akshare",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["code"], "600001")
+        self.assertEqual(rows[0]["close_price"], 10.5)
 
 
 if __name__ == "__main__":

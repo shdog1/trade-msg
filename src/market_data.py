@@ -62,6 +62,35 @@ class AkshareMarketProvider:
                 warnings=warnings,
             )
 
+    def fetch_stock_basic(self) -> pd.DataFrame:
+        with bypass_proxy_for_data():
+            try:
+                import akshare as ak
+            except ImportError as exc:
+                raise MarketDataError(
+                    "AKShare is not installed. Run `pip install -r requirements.txt` first."
+                ) from exc
+            return self._call(ak.stock_info_a_code_name, "A-share stock basic")
+
+    def fetch_daily_bars(self, code: str, start_date: date, end_date: date) -> pd.DataFrame:
+        with bypass_proxy_for_data():
+            try:
+                import akshare as ak
+            except ImportError as exc:
+                raise MarketDataError(
+                    "AKShare is not installed. Run `pip install -r requirements.txt` first."
+                ) from exc
+            try:
+                return ak.stock_zh_a_hist(
+                    symbol=code,
+                    period="daily",
+                    start_date=start_date.strftime("%Y%m%d"),
+                    end_date=end_date.strftime("%Y%m%d"),
+                    adjust="",
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise MarketDataError(f"Failed to fetch daily bars for {code}: {exc}") from exc
+
     def _fetch_spot(self, ak: Any, warnings: list[str]) -> pd.DataFrame:
         sources = [
             ("eastmoney", "stock_zh_a_spot_em"),

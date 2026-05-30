@@ -49,6 +49,18 @@ python -m src.cli --dry-run
 python -m src.cli --fetch-only
 ```
 
+补最近 250 天历史日 K：
+
+```powershell
+python -m src.cli --backfill-days 250
+```
+
+补单只股票历史日 K：
+
+```powershell
+python -m src.cli --backfill-days 250 --backfill-stock 600001
+```
+
 发送复盘邮件：
 
 ```powershell
@@ -89,6 +101,7 @@ reports/YYYY-MM-DD/recap.txt
 - `config.yaml`：复盘规则、候选数量、报告时间、交易日分界时间。
 - `.env`：邮箱账号、授权码、收件人等私密配置，不会提交到 Git。
 - MySQL 默认数据库：`trade_msg`，首次运行会自动建库建表。
+- 核心数据表：`stock_basic`、`market_quotes`、`quote_snapshots`、`daily_bars`、`index_quotes`、`limit_pool`、`hot_ranks`、`hot_topics`。
 
 ## 测试
 

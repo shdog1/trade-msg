@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from .analysis import build_recap
@@ -20,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Write report locally without sending.")
     parser.add_argument("--send", action="store_true", help="Send report by email.")
     parser.add_argument("--fetch-only", action="store_true", help="Fetch market data into MySQL without rendering.")
+    parser.add_argument("--backfill-days", type=int, default=None, help="Backfill daily bars for recent N days.")
+    parser.add_argument("--backfill-stock", default=None, help="Backfill daily bars for one stock code.")
     parser.add_argument("--date", default=None, help="Trade date to recap, e.g. 2026-05-29.")
     parser.add_argument("--test-email", action="store_true", help="Send a test email without fetching data.")
     args = parser.parse_args(argv)
@@ -28,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.test_email:
         return send_test_email(settings.push_title_prefix)
 
-    if not args.dry_run and not args.send and not args.fetch_only:
+    if not args.dry_run and not args.send and not args.fetch_only and args.backfill_days is None:
         args.dry_run = True
 
     trade_date = parse_trade_date(args.date) if args.date else resolve_trade_date_from_config(settings.raw)
@@ -41,6 +43,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.fetch_only:
         return fetch_into_database(store, settings, trade_date)
+
+    if args.backfill_days is not None:
+        return backfill_daily_bars(store, settings, trade_date, args.backfill_days, args.backfill_stock)
 
     try:
         ensure_market_data(store, settings, trade_date)
@@ -89,8 +94,11 @@ def parse_trade_date(value: str) -> date:
 
 def fetch_into_database(store: MySQLStore, settings: Settings, trade_date: date) -> int:
     try:
-        data = AkshareMarketProvider().fetch(settings.raw, trade_date=trade_date)
+        provider = AkshareMarketProvider()
+        data = provider.fetch(settings.raw, trade_date=trade_date)
+        stock_basic = provider.fetch_stock_basic()
         store.persist_market_data(data)
+        store.persist_stock_basic(stock_basic, fallback_spot=data.spot)
     except (DatabaseError, MarketDataError) as exc:
         try:
             store.record_fetch_run(trade_date, "akshare", "failed", str(exc))
@@ -102,11 +110,48 @@ def fetch_into_database(store: MySQLStore, settings: Settings, trade_date: date)
     return 0
 
 
+def backfill_daily_bars(
+    store: MySQLStore,
+    settings: Settings,
+    trade_date: date,
+    days: int,
+    stock_code: str | None,
+) -> int:
+    provider = AkshareMarketProvider()
+    try:
+        codes = [stock_code] if stock_code else store.list_stock_codes(main_board_only=False)
+        if not codes:
+            basic = provider.fetch_stock_basic()
+            store.persist_stock_basic(basic)
+            codes = [stock_code] if stock_code else store.list_stock_codes(main_board_only=False)
+        start_date = trade_date - timedelta(days=max(days * 2, days + 30))
+        total_rows = 0
+        for index, code in enumerate(codes, start=1):
+            latest = store.latest_daily_bar_date(code)
+            code_start = latest + timedelta(days=1) if latest else start_date
+            if code_start > trade_date:
+                continue
+            df = provider.fetch_daily_bars(code, code_start, trade_date)
+            total_rows += store.persist_daily_bars(df, code)
+            if index % 100 == 0:
+                print(f"Backfilled {index}/{len(codes)} stocks, rows={total_rows}.")
+    except (DatabaseError, MarketDataError) as exc:
+        print(f"Failed to backfill daily bars: {exc}", file=sys.stderr)
+        return 2
+    print(f"Backfilled daily bars for {len(codes)} stocks, rows={total_rows}.")
+    return 0
+
+
 def ensure_market_data(store: MySQLStore, settings: Settings, trade_date: date) -> None:
     if store.has_market_data(trade_date):
         return
-    data = AkshareMarketProvider().fetch(settings.raw, trade_date=trade_date)
+    provider = AkshareMarketProvider()
+    data = provider.fetch(settings.raw, trade_date=trade_date)
     store.persist_market_data(data)
+    try:
+        store.persist_stock_basic(provider.fetch_stock_basic(), fallback_spot=data.spot)
+    except (DatabaseError, MarketDataError):
+        store.persist_stock_basic(data.spot, fallback_spot=data.spot)
 
 
 def load_recent_cached_report(settings: Settings) -> tuple[str, str, str] | None:

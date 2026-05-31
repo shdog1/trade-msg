@@ -533,6 +533,10 @@ def load_limit_ladder_chart(store: MySQLStore, trade_date: date) -> list[dict[st
                 "trade_date": item_date,
                 "max_limit_up_days": max_days,
                 "names": "、".join(str(item) for item in leaders["name"].tolist()),
+                "leaders": [
+                    {"code": str(row.code), "name": str(row.name)}
+                    for row in leaders.itertuples()
+                ],
             }
         )
     return result
@@ -605,8 +609,8 @@ def render_limit_ladder(items: list[dict[str, object]]) -> str:
 def render_limit_ladder_chart(items: list[dict[str, object]]) -> str:
     if len(items) < 2:
         return "<div class=\"empty-chart\">连板天梯图数据不足</div>"
-    width, height = 980, 360
-    left, right, top, bottom = 58, 24, 28, 58
+    width, height = 980, 420
+    left, right, top, bottom = 58, 36, 78, 58
     max_days = max(int(item.get("max_limit_up_days") or 0) for item in items)
     max_days = max(2, max_days)
     min_days = 2
@@ -628,10 +632,24 @@ def render_limit_ladder_chart(items: list[dict[str, object]]) -> str:
         y = y_at(days)
         points.append(f"{x:.1f},{y:.1f}")
         color = limit_color(days)
-        name = html.escape(str(item.get("names") or ""))
+        leaders = chart_leaders(item)
+        label_svg = []
+        start_y = max(18, y - 14 - (len(leaders) - 1) * 22)
+        for label_index, leader in enumerate(leaders):
+            text = truncate_label(chart_label_text(leader), 8)
+            label_w = min(112, max(44, estimate_label_width(text)))
+            label_x = clamp(x, left + label_w / 2, width - right - label_w / 2)
+            label_y = start_y + label_index * 22
+            fill = limit_label_color(days, label_index)
+            label_svg.append(
+                f"<rect x=\"{label_x - label_w / 2:.1f}\" y=\"{label_y - 14:.1f}\" "
+                f"width=\"{label_w:.1f}\" height=\"18\" rx=\"9\" fill=\"{fill}\"/>"
+                f"<text x=\"{label_x:.1f}\" y=\"{label_y:.1f}\" font-size=\"10\" "
+                f"fill=\"{contrast_color(days)}\" text-anchor=\"middle\">{html.escape(text)}</text>"
+            )
         labels.append(
             f"<circle cx=\"{x:.1f}\" cy=\"{y:.1f}\" r=\"5\" fill=\"{color}\"/>"
-            f"<text x=\"{x + 6:.1f}\" y=\"{y - 7:.1f}\" font-size=\"11\" fill=\"#344054\">{name}</text>"
+            + "".join(label_svg)
         )
 
     grid = []
@@ -678,8 +696,57 @@ def limit_color(days: int) -> str:
     return palette.get(min(max(days, 2), 10), "#7f1d1d")
 
 
+def limit_label_color(days: int, offset: int) -> str:
+    palettes = {
+        2: ["#fee2e2", "#fecaca", "#fca5a5"],
+        3: ["#fecaca", "#fca5a5", "#f87171"],
+        4: ["#fca5a5", "#f87171", "#ef4444"],
+        5: ["#f87171", "#ef4444", "#dc2626"],
+        6: ["#ef4444", "#dc2626", "#b91c1c"],
+        7: ["#dc2626", "#b91c1c", "#991b1b"],
+        8: ["#b91c1c", "#991b1b", "#7f1d1d"],
+        9: ["#991b1b", "#7f1d1d", "#651515"],
+        10: ["#7f1d1d", "#651515", "#450a0a"],
+    }
+    values = palettes.get(min(max(days, 2), 10), palettes[10])
+    return values[offset % len(values)]
+
+
 def contrast_color(days: int) -> str:
     return "#172033" if days <= 4 else "#ffffff"
+
+
+def chart_leaders(item: dict[str, object]) -> list[dict[str, str]]:
+    leaders = item.get("leaders")
+    if isinstance(leaders, list) and leaders:
+        return [
+            {"code": str(leader.get("code") or ""), "name": str(leader.get("name") or "")}
+            for leader in leaders
+            if isinstance(leader, dict)
+        ][:3]
+    names = [part.strip() for part in str(item.get("names") or "").split("、") if part.strip()]
+    return [{"code": "", "name": name} for name in names[:3]] or [{"code": "", "name": ""}]
+
+
+def chart_label_text(leader: dict[str, str]) -> str:
+    code = leader.get("code", "")
+    name = leader.get("name", "")
+    return f"{code} {name}".strip() if code else name
+
+
+def truncate_label(value: str, max_chars: int) -> str:
+    return value if len(value) <= max_chars else value[:max_chars] + "…"
+
+
+def estimate_label_width(value: str) -> int:
+    width = 16
+    for char in value:
+        width += 11 if ord(char) > 127 else 6
+    return width
+
+
+def clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
 
 
 def render_price_volume_svg(bars: list[dict[str, object]]) -> str:

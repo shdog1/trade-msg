@@ -108,6 +108,28 @@ class WebConsoleTest(unittest.TestCase):
         self.assertIn("5板", content)
         self.assertIn("90日连板天梯图", content)
 
+    def test_limit_ladder_chart_stacks_multiple_leaders_above_point(self) -> None:
+        content = render_limit_ladder_chart(
+            [
+                {"trade_date": "2026-05-26", "max_limit_up_days": 3, "names": "A"},
+                {
+                    "trade_date": "2026-05-27",
+                    "max_limit_up_days": 8,
+                    "leaders": [
+                        {"code": "600001", "name": "一号股份"},
+                        {"code": "600002", "name": "二号股份"},
+                        {"code": "600003", "name": "三号股份"},
+                    ],
+                },
+                {"trade_date": "2026-05-28", "max_limit_up_days": 4, "names": "C"},
+            ]
+        )
+
+        self.assertIn("600001 一…", content)
+        self.assertIn("600002 二…", content)
+        self.assertIn("600003 三…", content)
+        self.assertGreaterEqual(content.count("<rect x="), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

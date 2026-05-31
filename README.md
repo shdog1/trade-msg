@@ -54,9 +54,10 @@ http://127.0.0.1:8765
 - 评分权重以百分比配置。
 - 保存配置到 `config.yaml`。
 - 安装 Windows 自动任务。
-- 手动执行采集、复盘、发送、刷新交易日历、测试邮件、回补日 K。
+- 手动执行采集、复盘、发送、刷新交易日历、测试邮件、回补日 K、回补连板天梯数据。
 - 查看执行过程输出，并可中断当前任务。
 - 回补历史日 K 可填写多个股票代码，逗号、空格或换行分隔；留空则回补主板。
+- 连板天梯图来自 `limit_pool` 历史涨停池，需要先回补最近交易日连板数据。
 
 ## 常用命令
 
@@ -70,6 +71,12 @@ python -m src.cli --fetch-only
 
 ```powershell
 python -m src.cli --refresh-calendar
+```
+
+回补最近 90 个交易日连板天梯数据：
+
+```powershell
+python -m src.cli --backfill-limit-pool-days 90 --limit-pool-sleep 1.0
 ```
 
 回补最近 250 天主板历史日 K：

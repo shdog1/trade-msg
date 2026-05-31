@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import unittest
 
-from src.web import build_backfill_command, render_limit_ladder, render_limit_ladder_chart, render_price_volume_svg, split_codes, update_config
+from src.web import (
+    build_backfill_command,
+    build_backfill_limit_pool_command,
+    limit_color,
+    render_limit_ladder,
+    render_limit_ladder_chart,
+    render_price_volume_svg,
+    split_codes,
+    update_config,
+)
 
 
 class WebConsoleTest(unittest.TestCase):
@@ -43,6 +52,19 @@ class WebConsoleTest(unittest.TestCase):
         self.assertIn("600001", command)
         self.assertIn("000001", command)
 
+    def test_backfill_limit_pool_command_uses_days_and_sleep(self) -> None:
+        command = build_backfill_limit_pool_command(
+            {
+                "limit_pool_days": ["90"],
+                "limit_pool_sleep": ["1.0"],
+            }
+        )
+
+        self.assertIn("--backfill-limit-pool-days", command)
+        self.assertIn("90", command)
+        self.assertIn("--limit-pool-sleep", command)
+        self.assertIn("1.0", command)
+
     def test_price_volume_svg_renders_close_and_volume(self) -> None:
         svg = render_price_volume_svg(
             [
@@ -68,6 +90,10 @@ class WebConsoleTest(unittest.TestCase):
         self.assertIn("5", content)
         self.assertIn("ladder-table", content)
         self.assertIn("ladder-badge", content)
+
+    def test_limit_ladder_uses_red_depth_palette(self) -> None:
+        self.assertEqual(limit_color(2), "#fee2e2")
+        self.assertEqual(limit_color(10), "#7f1d1d")
 
     def test_limit_ladder_chart_renders_connected_points(self) -> None:
         content = render_limit_ladder_chart(

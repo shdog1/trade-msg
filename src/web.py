@@ -139,6 +139,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 JOB.start(title, [sys.executable, "-u", "-m", "src.cli", *args])
             elif action == "backfill":
                 JOB.start("回补历史日 K", build_backfill_command(form))
+            elif action == "backfill_limit_pool":
+                JOB.start("回补连板天梯数据", build_backfill_limit_pool_command(form))
             else:
                 JOB.note("未知操作。")
         except Exception as exc:  # noqa: BLE001
@@ -188,6 +190,19 @@ def build_backfill_command(form: dict[str, list[str]]) -> list[str]:
     for code in split_codes(form_value(form, "backfill_stocks")):
         command.extend(["--backfill-stock", code])
     return command
+
+
+def build_backfill_limit_pool_command(form: dict[str, list[str]]) -> list[str]:
+    return [
+        sys.executable,
+        "-u",
+        "-m",
+        "src.cli",
+        "--backfill-limit-pool-days",
+        form_value(form, "limit_pool_days") or "90",
+        "--limit-pool-sleep",
+        form_value(form, "limit_pool_sleep") or "1.0",
+    ]
 
 
 def split_codes(value: str) -> list[str]:
@@ -334,6 +349,11 @@ window.addEventListener('load', pollStatus);
 <label style="grid-column:span 2">指定股票代码（逗号/空格/换行分隔，可空）<input name="backfill_stocks" placeholder="600001, 000001"></label>
 </div>
 <div class="actions" style="margin-top:12px"><button class="secondary" name="action" value="backfill">回补历史日 K</button></div>
+<div class="grid" style="margin-top:14px">
+<label>连板回补交易日<input name="limit_pool_days" type="number" min="1" max="250" value="90"></label>
+<label>连板请求间隔秒<input name="limit_pool_sleep" type="number" min="0" step="0.1" value="1.0"></label>
+</div>
+<div class="actions" style="margin-top:12px"><button class="secondary" name="action" value="backfill_limit_pool">回补连板天梯数据</button></div>
 </section>
 <section>
 <div class="job-head">
@@ -635,7 +655,7 @@ def render_limit_ladder_chart(items: list[dict[str, object]]) -> str:
 <svg viewBox="0 0 {width} {height}" role="img" aria-label="90日连板天梯图">
 <rect width="{width}" height="{height}" fill="#fbfcff" rx="12"/>
 {''.join(grid)}
-<polyline points="{' '.join(points)}" fill="none" stroke="#2f6fed" stroke-width="2.4"/>
+<polyline points="{' '.join(points)}" fill="none" stroke="#dc2626" stroke-width="2.4"/>
 {''.join(labels)}
 {''.join(date_labels)}
 </svg>
@@ -645,17 +665,17 @@ def render_limit_ladder_chart(items: list[dict[str, object]]) -> str:
 
 def limit_color(days: int) -> str:
     palette = {
-        2: "#dbeafe",
-        3: "#bfdbfe",
-        4: "#93c5fd",
-        5: "#60a5fa",
-        6: "#3b82f6",
-        7: "#2563eb",
-        8: "#1d4ed8",
-        9: "#1e40af",
-        10: "#1e3a8a",
+        2: "#fee2e2",
+        3: "#fecaca",
+        4: "#fca5a5",
+        5: "#f87171",
+        6: "#ef4444",
+        7: "#dc2626",
+        8: "#b91c1c",
+        9: "#991b1b",
+        10: "#7f1d1d",
     }
-    return palette.get(min(max(days, 2), 10), "#1e3a8a")
+    return palette.get(min(max(days, 2), 10), "#7f1d1d")
 
 
 def contrast_color(days: int) -> str:

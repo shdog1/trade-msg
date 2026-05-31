@@ -23,6 +23,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fetch-only", action="store_true", help="Fetch market data into MySQL without rendering.")
     parser.add_argument("--backfill-days", type=int, default=None, help="Backfill daily bars for recent N days.")
     parser.add_argument(
+        "--backfill-limit-pool-days",
+        type=int,
+        default=None,
+        help="Backfill limit-up pool data for recent N trading days.",
+    )
+    parser.add_argument(
         "--backfill-stock",
         action="append",
         default=None,
@@ -34,6 +40,12 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=1.0,
         help="Seconds to wait between daily bar requests during backfill.",
+    )
+    parser.add_argument(
+        "--limit-pool-sleep",
+        type=float,
+        default=1.0,
+        help="Seconds to wait between limit-up pool requests during backfill.",
     )
     parser.add_argument("--date", default=None, help="Trade date to recap, e.g. 2026-05-29.")
     parser.add_argument("--scheduled", action="store_true", help="Skip automatically when today is not a trading day.")
@@ -52,7 +64,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.test_email:
         return send_test_email(settings.push_title_prefix)
 
-    if not args.dry_run and not args.send and not args.fetch_only and args.backfill_days is None:
+    if (
+        not args.dry_run
+        and not args.send
+        and not args.fetch_only
+        and args.backfill_days is None
+        and args.backfill_limit_pool_days is None
+    ):
         args.dry_run = True
 
     trade_date = parse_trade_date(args.date) if args.date else resolve_trade_date_from_config(settings.raw)
@@ -82,6 +100,14 @@ def main(argv: list[str] | None = None) -> int:
             parse_stock_codes(args.backfill_stock),
             max(args.backfill_sleep, 0),
             args.backfill_all,
+        )
+
+    if args.backfill_limit_pool_days is not None:
+        return backfill_limit_pool(
+            store,
+            trade_date,
+            args.backfill_limit_pool_days,
+            max(args.limit_pool_sleep, 0),
         )
 
     try:
@@ -246,6 +272,47 @@ def backfill_daily_bars(
         print("Failed stocks: " + ", ".join(code for code, _ in failures[:30]), file=sys.stderr)
         if len(failures) > 30:
             print(f"... and {len(failures) - 30} more failures.", file=sys.stderr)
+    return 0
+
+
+def backfill_limit_pool(store: MySQLStore, trade_date: date, days: int, request_sleep: float = 1.0) -> int:
+    provider = AkshareMarketProvider()
+    try:
+        trade_dates = sorted(item for item in store.list_trade_dates() if item <= trade_date)
+        if not trade_dates:
+            fetched_dates = load_trade_dates_from_akshare()
+            if fetched_dates:
+                store.persist_trade_calendar(fetched_dates)
+            trade_dates = sorted(item for item in store.list_trade_dates() if item <= trade_date)
+        if not trade_dates:
+            raise MarketDataError("Trading calendar is empty. Run --refresh-calendar first.")
+
+        target_dates = trade_dates[-max(days, 1) :]
+        total_rows = 0
+        failures: list[tuple[date, str]] = []
+        for index, item_date in enumerate(target_dates, start=1):
+            try:
+                df = provider.fetch_limit_pool(item_date)
+                rows = store.persist_limit_pool(df, item_date)
+                total_rows += rows
+                store.record_fetch_run(item_date, "limit_pool:akshare", "success", None)
+                print(f"Backfilled limit pool {index}/{len(target_dates)} {item_date.isoformat()}, rows={rows}.")
+            except (DatabaseError, MarketDataError) as exc:
+                message = str(exc)
+                failures.append((item_date, message))
+                try:
+                    store.record_fetch_run(item_date, "limit_pool:akshare", "failed", message)
+                except DatabaseError:
+                    pass
+                print(f"Skip limit pool {item_date.isoformat()}: {message}", file=sys.stderr)
+            sleep(request_sleep)
+    except (DatabaseError, MarketDataError) as exc:
+        print(f"Failed to backfill limit-up pool: {exc}", file=sys.stderr)
+        return 2
+    print(
+        f"Backfilled limit-up pool for {len(target_dates)} trading days, "
+        f"rows={total_rows}, failures={len(failures)}."
+    )
     return 0
 
 

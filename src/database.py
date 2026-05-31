@@ -214,6 +214,17 @@ class MySQLStore:
             self._upsert_many(conn, "daily_bars", rows)
         return len(rows)
 
+    def persist_limit_pool(self, df: pd.DataFrame, trade_date: date, source: str = "akshare") -> int:
+        self.initialize()
+        limit_pool = normalize_limit_pool(df)
+        rows = [
+            {"trade_date": trade_date, "code": code, "limit_up_days": days, "source": source}
+            for code, days in limit_pool.items()
+        ]
+        with self.engine.begin() as conn:
+            self._upsert_many(conn, "limit_pool", rows)
+        return len(rows)
+
     def persist_trade_calendar(self, trade_dates: set[date], source: str = "akshare") -> int:
         self.initialize()
         rows = [

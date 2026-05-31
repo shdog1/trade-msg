@@ -134,6 +134,26 @@ class AkshareMarketProvider:
                 sleep(0.5)
             raise MarketDataError(f"Failed to fetch daily bars for {code}: {' | '.join(errors)}")
 
+    def fetch_limit_pool(self, trade_date: date) -> pd.DataFrame:
+        with bypass_proxy_for_data():
+            try:
+                import akshare as ak
+            except ImportError as exc:
+                raise MarketDataError(
+                    "AKShare is not installed. Run `pip install -r requirements.txt` first."
+                ) from exc
+
+            func = getattr(ak, "stock_zt_pool_em", None)
+            if func is None:
+                raise MarketDataError("AKShare function `stock_zt_pool_em` is unavailable.")
+            try:
+                df = func(date=trade_date.strftime("%Y%m%d"))
+            except Exception as exc:  # noqa: BLE001
+                raise MarketDataError(f"Failed to fetch limit-up pool for {trade_date.isoformat()}: {exc}") from exc
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                raise MarketDataError(f"Limit-up pool for {trade_date.isoformat()} returned no rows.")
+            return df
+
     def _fetch_spot(self, ak: Any, warnings: list[str]) -> pd.DataFrame:
         sources = [
             ("eastmoney", "stock_zh_a_spot_em"),

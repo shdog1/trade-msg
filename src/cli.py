@@ -12,7 +12,7 @@ from .database import DatabaseError, MySQLStore
 from .market_data import AkshareMarketProvider, MarketDataError
 from .email_notifier import EmailNotifier, NotifyError
 from .report import render_report
-from .trading_calendar import resolve_trade_date_from_config
+from .trading_calendar import load_trade_dates_from_akshare, now_in_timezone, resolve_trade_date_from_config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -31,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Seconds to wait between daily bar requests during backfill.",
     )
     parser.add_argument("--date", default=None, help="Trade date to recap, e.g. 2026-05-29.")
+    parser.add_argument("--scheduled", action="store_true", help="Skip automatically when today is not a trading day.")
+    parser.add_argument("--refresh-calendar", action="store_true", help="Fetch and store the A-share trading calendar.")
     parser.add_argument("--test-email", action="store_true", help="Send a test email without fetching data.")
     args = parser.parse_args(argv)
 
@@ -48,6 +50,13 @@ def main(argv: list[str] | None = None) -> int:
     except DatabaseError as exc:
         print(f"Failed to initialize MySQL: {exc}", file=sys.stderr)
         return 4
+
+    if args.refresh_calendar:
+        return refresh_trade_calendar(store, trade_date)
+
+    if args.scheduled and not args.date and should_skip_scheduled_run(store, settings):
+        print("Scheduled run skipped: today is not an A-share trading day.")
+        return 0
 
     if args.fetch_only:
         return fetch_into_database(store, settings, trade_date)
@@ -106,6 +115,42 @@ def main(argv: list[str] | None = None) -> int:
 
 def parse_trade_date(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def refresh_trade_calendar(store: MySQLStore, trade_date: date) -> int:
+    try:
+        trade_dates = load_trade_dates_from_akshare()
+        if not trade_dates:
+            raise MarketDataError("Trading calendar returned no rows.")
+        count = store.persist_trade_calendar(trade_dates)
+        store.record_fetch_run(trade_date, "trade_calendar", "success", None)
+    except (DatabaseError, MarketDataError, Exception) as exc:  # noqa: BLE001
+        try:
+            store.record_fetch_run(trade_date, "trade_calendar", "failed", str(exc))
+        except DatabaseError:
+            pass
+        print(f"Failed to refresh trading calendar: {exc}", file=sys.stderr)
+        return 2
+    print(f"Refreshed trading calendar, rows={count}.")
+    return 0
+
+
+def should_skip_scheduled_run(store: MySQLStore, settings: Settings) -> bool:
+    app = settings.raw.get("app", {})
+    if not bool(app.get("skip_non_trading_day", True)):
+        return False
+
+    timezone = str(app.get("timezone", "Asia/Shanghai"))
+    today = now_in_timezone(timezone).date()
+    trade_dates = store.list_trade_dates()
+    if not trade_dates:
+        try:
+            trade_dates = load_trade_dates_from_akshare()
+            if trade_dates:
+                store.persist_trade_calendar(trade_dates)
+        except Exception:  # noqa: BLE001
+            return True
+    return today not in trade_dates
 
 
 def fetch_into_database(store: MySQLStore, settings: Settings, trade_date: date) -> int:

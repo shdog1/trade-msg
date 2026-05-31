@@ -47,6 +47,12 @@ python -m src.cli --fetch-only
 python -m src.cli --backfill-days 250 --backfill-sleep 1.5
 ```
 
+刷新交易日历到 MySQL：
+
+```powershell
+python -m src.cli --refresh-calendar
+```
+
 回补单只股票历史日 K：
 
 ```powershell
@@ -89,6 +95,8 @@ python -m src.cli --test-email
 powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_task.ps1
 ```
 
+自动任务会使用 `trade_calendar` 判断当天是否交易日。非交易日自动跳过；手动执行 `python -m src.cli --send` 仍会发送最近交易日复盘。
+
 ## 分析依据
 
 候选股评分为 100 分制：
@@ -107,6 +115,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_task.ps1
 - `market_quotes`：每日收盘复盘行情快照。
 - `quote_snapshots`：实时行情采集快照。
 - `daily_bars`：历史日 K，用于短线形态分析。
+- `trade_calendar`：A 股交易日历，用于自动任务跳过非交易日。
 - `index_quotes`：指数行情。
 - `limit_pool`：涨停池和连板数据。
 - `hot_ranks`：人气排名。

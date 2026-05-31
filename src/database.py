@@ -214,6 +214,28 @@ class MySQLStore:
             self._upsert_many(conn, "daily_bars", rows)
         return len(rows)
 
+    def persist_trade_calendar(self, trade_dates: set[date], source: str = "akshare") -> int:
+        self.initialize()
+        rows = [
+            {"trade_date": item, "is_open": 1, "source": source}
+            for item in sorted(trade_dates)
+        ]
+        with self.engine.begin() as conn:
+            self._upsert_many(conn, "trade_calendar", rows)
+        return len(rows)
+
+    def list_trade_dates(self) -> set[date]:
+        df = self._read_df("SELECT trade_date FROM trade_calendar WHERE is_open = 1", {})
+        if df.empty:
+            return set()
+        return {pd.to_datetime(item).date() for item in df["trade_date"].dropna().tolist()}
+
+    def trade_calendar_count(self) -> int:
+        sqlalchemy = require_sqlalchemy()
+        with self.engine.begin() as conn:
+            count = conn.execute(sqlalchemy.text("SELECT COUNT(*) FROM trade_calendar WHERE is_open = 1")).scalar_one()
+        return int(count)
+
     def load_market_data(self, trade_date: date) -> MarketData:
         self.initialize()
         spot = self._read_df(
@@ -573,6 +595,7 @@ def ensure_index(conn: Any, database: str, table: str, index_name: str, columns:
 
 
 UNIQUE_KEY_COLUMNS = {
+    "trade_calendar": ["trade_date"],
     "stock_basic": ["code"],
     "market_quotes": ["trade_date", "code", "source"],
     "quote_snapshots": ["trade_date", "code", "source", "fetched_at"],
@@ -587,6 +610,10 @@ UNIQUE_KEY_COLUMNS = {
 
 
 INDEX_COLUMNS = {
+    "trade_calendar": {
+        "idx_trade_calendar_is_open": ["is_open"],
+        "idx_trade_calendar_source": ["source"],
+    },
     "fetch_runs": {
         "idx_fetch_runs_trade_source_status": ["trade_date", "source", "status"],
         "idx_fetch_runs_created_at": ["created_at"],
@@ -637,6 +664,18 @@ INDEX_COLUMNS = {
 
 
 SCHEMA_SQL = [
+    """
+    CREATE TABLE IF NOT EXISTS trade_calendar (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        trade_date DATE NOT NULL,
+        is_open TINYINT(1) NOT NULL DEFAULT 1,
+        source VARCHAR(32) NOT NULL DEFAULT 'akshare',
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_trade_calendar_business (trade_date),
+        KEY idx_trade_calendar_is_open (is_open),
+        KEY idx_trade_calendar_source (source)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
     """
     CREATE TABLE IF NOT EXISTS fetch_runs (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,

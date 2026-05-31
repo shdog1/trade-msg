@@ -13,7 +13,7 @@ if (-not (Test-Path $Python)) {
 
 $Action = New-ScheduledTaskAction `
     -Execute $Python `
-    -Argument "-m src.cli --send" `
+    -Argument "-m src.cli --send --scheduled" `
     -WorkingDirectory $ProjectRoot
 
 $Trigger = New-ScheduledTaskTrigger -Daily -At $Time

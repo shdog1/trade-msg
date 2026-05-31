@@ -34,12 +34,13 @@ class JobState:
     output: list[str] = field(default_factory=list)
     return_code: int | None = None
 
-    def start(self, title: str, command: list[str]) -> str:
+    def start(self, title: str, command: list[str]) -> None:
         with self.lock:
             if self.process and self.process.poll() is None:
-                return "已有任务正在执行。"
+                self.output.append("已有任务正在执行，请先中断或等待完成。")
+                return
             self.title = title
-            self.output = ["> " + " ".join(command)]
+            self.output = [f"已启动：{title}", "> " + " ".join(command)]
             self.return_code = None
             self.process = subprocess.Popen(
                 command,
@@ -50,7 +51,15 @@ class JobState:
                 bufsize=1,
             )
             threading.Thread(target=self._reader, daemon=True).start()
-            return f"已启动：{title}"
+
+    def note(self, message: str) -> None:
+        with self.lock:
+            if self.process and self.process.poll() is None:
+                self.output.append(message)
+                return
+            self.title = "配置操作"
+            self.return_code = None
+            self.output = [message]
 
     def _reader(self) -> None:
         process = self.process
@@ -65,13 +74,13 @@ class JobState:
             self.return_code = code
             self.output.append(f"任务结束，退出码 {code}。")
 
-    def stop(self) -> str:
+    def stop(self) -> None:
         with self.lock:
             if not self.process or self.process.poll() is not None:
-                return "当前没有运行中的任务。"
+                self.note("当前没有运行中的任务。")
+                return
             self.process.terminate()
-            self.output.append("已请求中断任务。")
-            return "已请求中断。"
+            self.output.append("已请求中断当前任务。")
 
     def snapshot(self) -> dict[str, object]:
         with self.lock:
@@ -96,7 +105,7 @@ def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
 class ConsoleHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/":
-            self.respond_html(render_page(load_config(), None))
+            self.respond_html(render_page(load_config()))
             return
         if self.path == "/status":
             self.respond_json(JOB.snapshot())
@@ -108,28 +117,28 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         form = parse_qs(self.rfile.read(length).decode("utf-8"))
         action = form_value(form, "action")
         config = load_config()
-        message = ""
         try:
             if action == "save_config":
                 update_config(config, form)
                 save_config(config)
-                message = "配置已保存。"
+                JOB.note("配置已保存。")
             elif action == "install_task":
                 update_config(config, form)
                 save_config(config)
                 command = ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(TASK_SCRIPT), "-Time", form_value(form, "report_time")]
-                message = JOB.start("安装自动任务", command)
+                JOB.start("安装自动任务", command)
             elif action == "stop":
-                message = JOB.stop()
+                JOB.stop()
             elif action in CLI_ACTIONS:
-                message = JOB.start(CLI_ACTIONS[action][0], [sys.executable, "-u", "-m", "src.cli", *CLI_ACTIONS[action][1]])
+                title, args = CLI_ACTIONS[action]
+                JOB.start(title, [sys.executable, "-u", "-m", "src.cli", *args])
             elif action == "backfill":
-                message = JOB.start("回补历史日 K", build_backfill_command(form))
+                JOB.start("回补历史日 K", build_backfill_command(form))
             else:
-                message = "未知操作。"
+                JOB.note("未知操作。")
         except Exception as exc:  # noqa: BLE001
-            message = f"执行失败: {exc}"
-        self.respond_html(render_page(load_config(), message))
+            JOB.note(f"执行失败：{exc}")
+        self.respond_html(render_page(load_config()))
 
     def respond_html(self, content: str) -> None:
         body = content.encode("utf-8")
@@ -171,8 +180,7 @@ def build_backfill_command(form: dict[str, list[str]]) -> list[str]:
         "--backfill-sleep",
         form_value(form, "backfill_sleep") or "1.5",
     ]
-    codes = split_codes(form_value(form, "backfill_stocks"))
-    for code in codes:
+    for code in split_codes(form_value(form, "backfill_stocks")):
         command.extend(["--backfill-stock", code])
     return command
 
@@ -207,15 +215,14 @@ def update_config(config: dict, form: dict[str, list[str]]) -> None:
     turnover_yi = float(form_value(form, "min_turnover_yi") or 3)
     market["min_turnover_amount"] = int(turnover_yi * 100_000_000)
     for key, _ in SCORING_KEYS:
-        percent = float(form_value(form, key) or 0)
-        scoring[key] = percent / 100
+        scoring[key] = float(form_value(form, key) or 0) / 100
 
 
 def form_value(form: dict[str, list[str]], key: str) -> str:
     return form.get(key, [""])[0].strip()
 
 
-def render_page(config: dict, message: str | None) -> str:
+def render_page(config: dict) -> str:
     app = config.get("app", {})
     market = config.get("market", {})
     scoring = config.get("scoring", {})
@@ -227,24 +234,44 @@ def render_page(config: dict, message: str | None) -> str:
         """
         for key, label in SCORING_KEYS
     )
-    message_html = f"<div class=\"notice\">{html.escape(message)}</div>" if message else ""
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <title>trade-msg 控制台</title>
 <style>
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',Arial,sans-serif;margin:0;background:#f5f7fb;color:#1f2937}}
-main{{max-width:1040px;margin:0 auto;padding:24px}}
-h1{{font-size:24px;margin:0 0 16px}} h2{{font-size:18px;margin:0 0 12px}}
-section{{background:#fff;border:1px solid #e5e7eb;padding:16px;margin:14px 0}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}}
-label{{display:flex;flex-direction:column;gap:6px;font-size:13px;color:#4b5563}}
-input{{padding:8px;border:1px solid #d1d5db;font-size:14px}}
-button{{padding:9px 12px;border:1px solid #1f5fbf;background:#2f6fed;color:#fff;cursor:pointer;margin:4px 6px 4px 0}}
-button.secondary{{background:#fff;color:#1f5fbf}} button.danger{{background:#b42318;border-color:#b42318}}
-pre{{white-space:pre-wrap;background:#111827;color:#e5e7eb;padding:14px;min-height:180px;max-height:420px;overflow:auto}}
-.hint,.status{{font-size:13px;color:#6b7280}} .notice{{background:#ecfdf3;border:1px solid #abefc6;padding:10px;margin:10px 0}}
+:root{{
+  --bg:#f5f7fb;--panel:#ffffff;--ink:#172033;--muted:#667085;--line:#d8deea;
+  --blue:#2f6fed;--blue-soft:#eaf1ff;--green:#138a5e;--green-soft:#e8f7ef;
+  --amber:#a15c07;--amber-soft:#fff4df;--red:#b42318;--red-soft:#fee4e2;
+}}
+*{{box-sizing:border-box}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',Arial,sans-serif;margin:0;background:
+linear-gradient(135deg,#f7f9ff 0%,#f3fbf7 55%,#fff8ec 100%);color:var(--ink)}}
+main{{max-width:1120px;margin:0 auto;padding:28px}}
+.top{{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:18px}}
+h1{{font-size:26px;margin:0}} h2{{font-size:18px;margin:0 0 14px}} p{{margin:0}}
+.hint,.status{{font-size:13px;color:var(--muted)}}
+.layout{{display:grid;grid-template-columns:1fr;gap:16px}}
+section{{background:rgba(255,255,255,.92);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 10px 30px rgba(31,43,70,.07)}}
+.grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}}
+.grid.weights{{grid-template-columns:repeat(5,minmax(0,1fr))}}
+label{{display:flex;flex-direction:column;gap:7px;font-size:13px;color:#475467;min-width:0}}
+input{{width:100%;height:40px;border:1px solid #cfd6e4;border-radius:10px;padding:8px 10px;background:#fff;font-size:14px;color:var(--ink);outline:none}}
+input:focus{{border-color:var(--blue);box-shadow:0 0 0 3px rgba(47,111,237,.14)}}
+input[type=checkbox]{{width:18px;height:18px;margin:0}}
+.check{{display:flex;align-items:center;gap:9px;flex-direction:row;margin-top:14px}}
+.actions{{display:flex;flex-wrap:wrap;gap:10px}}
+button{{min-height:38px;border:1px solid var(--blue);border-radius:10px;background:var(--blue);color:#fff;cursor:pointer;padding:9px 13px;font-size:14px}}
+button.secondary{{background:var(--blue-soft);color:#164ca5;border-color:#b7cbff}}
+button.success{{background:var(--green);border-color:var(--green)}}
+button.warning{{background:var(--amber);border-color:var(--amber)}}
+button.danger{{background:var(--red);border-color:var(--red)}}
+.job-head{{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}}
+.pill{{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:5px 10px;background:var(--green-soft);color:var(--green);font-size:13px}}
+pre{{white-space:pre-wrap;background:#111827;color:#e5e7eb;border-radius:12px;padding:14px;min-height:230px;max-height:430px;overflow:auto;margin:0;font-size:13px;line-height:1.45}}
+@media(max-width:900px){{.grid,.grid.weights{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+@media(max-width:560px){{main{{padding:16px}}.grid,.grid.weights{{grid-template-columns:1fr}}.top,.job-head{{align-items:flex-start;flex-direction:column}}}}
 </style>
 <script>
 async function pollStatus(){{
@@ -259,9 +286,11 @@ window.addEventListener('load', pollStatus);
 </script>
 </head>
 <body><main>
-<h1>trade-msg 控制台</h1>
-{message_html}
-<form method="post">
+<div class="top">
+  <div><h1>trade-msg 控制台</h1><p class="hint">本地配置、执行、日志查看。</p></div>
+  <span class="pill">本机运行 127.0.0.1</span>
+</div>
+<form method="post" class="layout">
 <section>
 <h2>基础配置</h2>
 <div class="grid">
@@ -270,35 +299,42 @@ window.addEventListener('load', pollStatus);
 <label>最大候选数<input name="max_candidates" type="number" min="1" max="50" value="{html.escape(str(market.get('max_candidates', 8)))}"></label>
 <label>最低成交额（亿元）<input name="min_turnover_yi" type="number" min="0" step="0.1" value="{min_turnover_yi:.2f}"></label>
 </div>
-<p><label><input name="skip_non_trading_day" type="checkbox" {'checked' if app.get('skip_non_trading_day', True) else ''}> 自动任务跳过非交易日</label></p>
+<label class="check"><input name="skip_non_trading_day" type="checkbox" {'checked' if app.get('skip_non_trading_day', True) else ''}> 自动任务跳过非交易日</label>
 </section>
 <section>
 <h2>评分权重</h2>
-<p class="hint">当前合计：{weight_total:.1f}%。系统会自动归一化，不要求合计必须等于 100%。</p>
-<div class="grid">{rows}</div>
+<p class="hint">当前合计：{weight_total:.1f}%。系统自动归一化，不要求合计等于 100%。</p>
+<div class="grid weights">{rows}</div>
 </section>
 <section>
-<button name="action" value="save_config">保存配置</button>
-<button name="action" value="install_task">保存并安装自动任务</button>
+<h2>配置操作</h2>
+<div class="actions">
+<button class="success" name="action" value="save_config">保存配置</button>
+<button class="warning" name="action" value="install_task">保存并安装自动任务</button>
+</div>
 </section>
 <section>
 <h2>手动执行</h2>
+<div class="actions">
 <button class="secondary" name="action" value="dry_run">生成复盘</button>
 <button class="secondary" name="action" value="send">发送邮件</button>
 <button class="secondary" name="action" value="fetch_only">采集行情</button>
 <button class="secondary" name="action" value="refresh_calendar">刷新交易日历</button>
 <button class="secondary" name="action" value="test_email">测试邮件</button>
-<div class="grid">
+</div>
+<div class="grid" style="margin-top:14px">
 <label>回补天数<input name="backfill_days" type="number" min="1" value="250"></label>
 <label>请求间隔秒<input name="backfill_sleep" type="number" min="0" step="0.1" value="1.5"></label>
-<label>指定股票代码（逗号/空格分隔，可空）<input name="backfill_stocks" placeholder="600001, 000001"></label>
+<label style="grid-column:span 2">指定股票代码（逗号/空格/换行分隔，可空）<input name="backfill_stocks" placeholder="600001, 000001"></label>
 </div>
-<button class="secondary" name="action" value="backfill">回补历史日 K</button>
+<div class="actions" style="margin-top:12px"><button class="secondary" name="action" value="backfill">回补历史日 K</button></div>
 </section>
 <section>
-<h2>执行过程</h2>
-<p class="status">任务：<span id="job-title">无任务</span> | 状态：<span id="job-state">空闲</span></p>
-<button class="danger" name="action" value="stop">中断当前任务</button>
+<div class="job-head">
+  <h2>执行过程</h2>
+  <p class="status">任务：<span id="job-title">无任务</span> | 状态：<span id="job-state">空闲</span></p>
+</div>
+<div class="actions" style="margin-bottom:12px"><button class="danger" name="action" value="stop">中断当前任务</button></div>
 <pre id="job-output"></pre>
 </section>
 </form>

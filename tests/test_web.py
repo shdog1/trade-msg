@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.web import build_backfill_command, split_codes, update_config
+from src.web import build_backfill_command, render_price_volume_svg, split_codes, update_config
 
 
 class WebConsoleTest(unittest.TestCase):
@@ -42,6 +42,19 @@ class WebConsoleTest(unittest.TestCase):
         self.assertIn("--backfill-stock", command)
         self.assertIn("600001", command)
         self.assertIn("000001", command)
+
+    def test_price_volume_svg_renders_close_and_volume(self) -> None:
+        svg = render_price_volume_svg(
+            [
+                {"close_price": 10, "turnover": 100},
+                {"close_price": 11, "turnover": 180},
+                {"close_price": 10.5, "turnover": 120},
+            ]
+        )
+
+        self.assertIn("<svg", svg)
+        self.assertIn("成交量", svg)
+        self.assertIn("收盘 10.50", svg)
 
 
 if __name__ == "__main__":

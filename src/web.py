@@ -7,12 +7,14 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
 import yaml
 
-from .config import ROOT
+from .config import ROOT, load_settings
+from .database import MySQLStore
 
 
 CONFIG_PATH = ROOT / "config.yaml"
@@ -106,6 +108,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/":
             self.respond_html(render_page(load_config()))
+            return
+        if self.path.startswith("/report"):
+            self.respond_html(render_report_page())
             return
         if self.path == "/status":
             self.respond_json(JOB.snapshot())
@@ -267,6 +272,7 @@ button.secondary{{background:var(--blue-soft);color:#164ca5;border-color:#b7cbff
 button.success{{background:var(--green);border-color:var(--green)}}
 button.warning{{background:var(--amber);border-color:var(--amber)}}
 button.danger{{background:var(--red);border-color:var(--red)}}
+.link-button{{display:inline-flex;align-items:center;min-height:38px;border:1px solid #b7cbff;border-radius:10px;background:var(--blue-soft);color:#164ca5;text-decoration:none;padding:9px 13px;font-size:14px}}
 .job-head{{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}}
 .pill{{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:5px 10px;background:var(--green-soft);color:var(--green);font-size:13px}}
 pre{{white-space:pre-wrap;background:#111827;color:#e5e7eb;border-radius:12px;padding:14px;min-height:230px;max-height:430px;overflow:auto;margin:0;font-size:13px;line-height:1.45}}
@@ -288,7 +294,7 @@ window.addEventListener('load', pollStatus);
 <body><main>
 <div class="top">
   <div><h1>trade-msg 控制台</h1><p class="hint">本地配置、执行、日志查看。</p></div>
-  <span class="pill">本机运行 127.0.0.1</span>
+  <div class="actions"><a class="link-button" href="/report">查看最近报告</a><span class="pill">本机运行 127.0.0.1</span></div>
 </div>
 <form method="post" class="layout">
 <section>
@@ -339,6 +345,176 @@ window.addEventListener('load', pollStatus);
 </section>
 </form>
 </main></body></html>"""
+
+
+def render_report_page() -> str:
+    try:
+        payload = load_latest_report_payload()
+    except Exception as exc:  # noqa: BLE001
+        body = f"<section><h2>读取失败</h2><p>{html.escape(str(exc))}</p></section>"
+        return render_shell("最近复盘报告", body, active_report=True)
+
+    if not payload["report"]:
+        return render_shell("最近复盘报告", "<section><h2>暂无报告</h2><p>请先生成一次复盘。</p></section>", active_report=True)
+
+    report = payload["report"]
+    candidates = payload["candidates"]
+    cards = "\n".join(render_candidate_chart(item, payload["bars"].get(item["code"], [])) for item in candidates)
+    candidate_html = cards or "<p class=\"hint\">暂无候选股。</p>"
+    body = f"""
+<section>
+<h2>{html.escape(str(report.get('title') or '最近复盘报告'))}</h2>
+<p class="hint">交易日：{html.escape(str(report.get('trade_date')))} | 发送状态：{html.escape(str(report.get('send_status') or '-'))}</p>
+</section>
+<section>
+<h2>候选股票日线与成交量</h2>
+<div class="chart-grid">{candidate_html}</div>
+</section>
+"""
+    return render_shell("最近复盘报告", body, active_report=True)
+
+
+def render_shell(title: str, body: str, active_report: bool = False) -> str:
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>{html.escape(title)}</title>
+{base_style()}
+</head>
+<body><main>
+<div class="top">
+  <div><h1>{html.escape(title)}</h1><p class="hint">最近一次复盘结果。</p></div>
+  <div class="actions"><a class="link-button" href="/">控制台</a><a class="link-button {'active' if active_report else ''}" href="/report">最近报告</a></div>
+</div>
+{body}
+</main></body></html>"""
+
+
+def load_latest_report_payload() -> dict[str, object]:
+    settings = load_settings(CONFIG_PATH)
+    store = MySQLStore.from_env(settings.raw)
+    store.initialize()
+    report_df = store._read_df("SELECT * FROM recap_reports ORDER BY trade_date DESC LIMIT 1", {})
+    if report_df.empty:
+        return {"report": None, "candidates": [], "bars": {}}
+    report = dict(report_df.iloc[0].to_dict())
+    trade_date = report["trade_date"]
+    candidate_df = store._read_df(
+        "SELECT code, name, strategy_tags, score, trigger_text, invalidation_text, reasons "
+        "FROM recap_candidates WHERE trade_date = :trade_date ORDER BY score DESC",
+        {"trade_date": trade_date},
+    )
+    candidates = [normalize_candidate_row(row) for row in candidate_df.to_dict("records")]
+    bars = {
+        item["code"]: store._read_df(
+            "SELECT trade_date, close_price, turnover FROM daily_bars "
+            "WHERE code = :code AND trade_date <= :trade_date ORDER BY trade_date DESC LIMIT 80",
+            {"code": item["code"], "trade_date": trade_date},
+        ).sort_values("trade_date").to_dict("records")
+        for item in candidates
+    }
+    return {"report": report, "candidates": candidates, "bars": bars}
+
+
+def normalize_candidate_row(row: dict[str, object]) -> dict[str, object]:
+    return {
+        "code": str(row.get("code") or ""),
+        "name": str(row.get("name") or ""),
+        "score": int(row.get("score") or 0),
+        "strategy_tags": parse_json_list(row.get("strategy_tags")),
+        "reasons": parse_json_list(row.get("reasons")),
+        "trigger_text": str(row.get("trigger_text") or ""),
+        "invalidation_text": str(row.get("invalidation_text") or ""),
+    }
+
+
+def parse_json_list(value: object) -> list[str]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(str(value))
+    except json.JSONDecodeError:
+        return [str(value)]
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed]
+    return [str(parsed)]
+
+
+def render_candidate_chart(candidate: dict[str, object], bars: list[dict[str, object]]) -> str:
+    tags = "".join(f"<span class=\"tag\">{html.escape(tag)}</span>" for tag in candidate["strategy_tags"])
+    reasons = "; ".join(str(item) for item in candidate["reasons"])
+    return f"""
+<article class="stock-card">
+<div class="stock-head">
+  <div><strong>{html.escape(str(candidate['code']))} {html.escape(str(candidate['name']))}</strong><div>{tags}</div></div>
+  <span class="score">{candidate['score']}%</span>
+</div>
+{render_price_volume_svg(bars)}
+<p class="hint">入场：{html.escape(str(candidate['trigger_text']))}</p>
+<p class="hint">失效：{html.escape(str(candidate['invalidation_text']))}</p>
+<p class="hint">依据：{html.escape(reasons)}</p>
+</article>
+"""
+
+
+def render_price_volume_svg(bars: list[dict[str, object]]) -> str:
+    if len(bars) < 2:
+        return "<div class=\"empty-chart\">日线数据不足</div>"
+    closes = [float(item.get("close_price") or 0) for item in bars]
+    turnovers = [float(item.get("turnover") or 0) for item in bars]
+    width, height = 520, 220
+    price_top, price_bottom = 14, 138
+    volume_top, volume_bottom = 155, 210
+    min_price, max_price = min(closes), max(closes)
+    max_volume = max(turnovers) if turnovers else 0
+    price_range = max(max_price - min_price, 0.01)
+    step = width / max(len(closes) - 1, 1)
+    points = []
+    bars_svg = []
+    for index, close in enumerate(closes):
+        x = index * step
+        y = price_bottom - ((close - min_price) / price_range) * (price_bottom - price_top)
+        points.append(f"{x:.1f},{y:.1f}")
+        volume = turnovers[index] if index < len(turnovers) else 0
+        bar_h = 0 if max_volume <= 0 else (volume / max_volume) * (volume_bottom - volume_top)
+        color = "#16a34a" if index == 0 or close >= closes[index - 1] else "#dc2626"
+        bars_svg.append(f"<rect x=\"{max(0, x - 2):.1f}\" y=\"{volume_bottom - bar_h:.1f}\" width=\"4\" height=\"{bar_h:.1f}\" fill=\"{color}\" opacity=\"0.55\"/>")
+    last = closes[-1]
+    first = closes[0]
+    change = (last / first - 1) * 100 if first else 0
+    return f"""
+<svg viewBox="0 0 {width} {height}" role="img" aria-label="日线图和成交量">
+<rect width="{width}" height="{height}" fill="#fbfcff" rx="10"/>
+<line x1="0" y1="{price_bottom}" x2="{width}" y2="{price_bottom}" stroke="#e5e7eb"/>
+<line x1="0" y1="{volume_top}" x2="{width}" y2="{volume_top}" stroke="#e5e7eb"/>
+<polyline points="{' '.join(points)}" fill="none" stroke="#2f6fed" stroke-width="2.4"/>
+{''.join(bars_svg)}
+<text x="10" y="28" fill="#475467" font-size="13">收盘 {last:.2f} / 区间 {change:.1f}%</text>
+<text x="10" y="152" fill="#667085" font-size="12">成交量</text>
+</svg>
+"""
+
+
+def base_style() -> str:
+    return """
+<style>
+:root{--ink:#172033;--muted:#667085;--line:#d8deea;--blue:#2f6fed;--blue-soft:#eaf1ff;--green:#138a5e;--amber:#a15c07;--red:#b42318}
+*{box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',Arial,sans-serif;margin:0;background:linear-gradient(135deg,#f7f9ff 0%,#f3fbf7 55%,#fff8ec 100%);color:var(--ink)}
+main{max-width:1120px;margin:0 auto;padding:28px}
+.top{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:18px}
+h1{font-size:26px;margin:0} h2{font-size:18px;margin:0 0 14px} p{margin:0 0 8px}
+.hint,.status{font-size:13px;color:var(--muted)}
+section,.stock-card{background:rgba(255,255,255,.92);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 10px 30px rgba(31,43,70,.07)}
+section{margin-bottom:16px}
+.actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}.link-button{display:inline-flex;align-items:center;min-height:38px;border:1px solid #b7cbff;border-radius:10px;background:var(--blue-soft);color:#164ca5;text-decoration:none;padding:9px 13px;font-size:14px}.link-button.active{background:var(--blue);color:#fff}
+.chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.stock-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px}.score{font-weight:700;color:#b42318}.tag{display:inline-block;background:#eaf1ff;color:#164ca5;border-radius:999px;padding:3px 8px;margin:6px 5px 0 0;font-size:12px}
+svg{width:100%;height:auto;margin:4px 0 10px}.empty-chart{height:220px;display:grid;place-items:center;background:#f8fafc;border-radius:10px;color:var(--muted)}
+@media(max-width:820px){.chart-grid{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}main{padding:16px}}
+</style>
+"""
 
 
 def main(argv: list[str] | None = None) -> int:

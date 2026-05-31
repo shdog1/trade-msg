@@ -17,7 +17,7 @@ $Action = New-ScheduledTaskAction `
     -WorkingDirectory $ProjectRoot
 
 $Trigger = New-ScheduledTaskTrigger -Daily -At $Time
-$Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel LeastPrivilege
+$Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
 
 Register-ScheduledTask `

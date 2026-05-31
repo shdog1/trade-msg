@@ -41,7 +41,7 @@ MYSQL_CHARSET=utf8mb4
 python -m src.cli --fetch-only
 ```
 
-回补最近 250 天历史日 K：
+回补最近 250 天主板历史日 K：
 
 ```powershell
 python -m src.cli --backfill-days 250 --backfill-sleep 1.5
@@ -51,6 +51,12 @@ python -m src.cli --backfill-days 250 --backfill-sleep 1.5
 
 ```powershell
 python -m src.cli --backfill-days 250 --backfill-stock 600001 --backfill-sleep 1.5
+```
+
+如需回补全 A：
+
+```powershell
+python -m src.cli --backfill-days 250 --backfill-all --backfill-sleep 1.5
 ```
 
 生成本地复盘，不发邮件：

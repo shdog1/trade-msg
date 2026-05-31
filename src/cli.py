@@ -23,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fetch-only", action="store_true", help="Fetch market data into MySQL without rendering.")
     parser.add_argument("--backfill-days", type=int, default=None, help="Backfill daily bars for recent N days.")
     parser.add_argument("--backfill-stock", default=None, help="Backfill daily bars for one stock code.")
+    parser.add_argument("--backfill-all", action="store_true", help="Backfill all A-share stocks instead of main board only.")
     parser.add_argument(
         "--backfill-sleep",
         type=float,
@@ -59,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
             args.backfill_days,
             args.backfill_stock,
             max(args.backfill_sleep, 0),
+            args.backfill_all,
         )
 
     try:
@@ -131,14 +133,15 @@ def backfill_daily_bars(
     days: int,
     stock_code: str | None,
     request_sleep: float = 1.0,
+    include_all: bool = False,
 ) -> int:
     provider = AkshareMarketProvider()
     try:
-        codes = [stock_code] if stock_code else store.list_stock_codes(main_board_only=False)
+        codes = [stock_code] if stock_code else store.list_stock_codes(main_board_only=not include_all)
         if not codes:
             basic = provider.fetch_stock_basic()
             store.persist_stock_basic(basic)
-            codes = [stock_code] if stock_code else store.list_stock_codes(main_board_only=False)
+            codes = [stock_code] if stock_code else store.list_stock_codes(main_board_only=not include_all)
         start_date = trade_date - timedelta(days=max(days * 2, days + 30))
         total_rows = 0
         failures: list[tuple[str, str]] = []

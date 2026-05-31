@@ -524,7 +524,7 @@ def limit_pool_rows(df: pd.DataFrame, trade_date: date, source: str = "akshare")
         return []
     limit_pool = normalize_limit_pool(df)
     industry_col = first_existing(df, ["所属行业", "行业", "板块", "industry"])
-    reason_col = first_existing(df, ["涨停原因类别", "涨停原因", "原因", "limit_up_reason", "reason"])
+    reason_col = first_existing(df, ["涨停原因类别", "涨停原因", "入选理由", "原因", "limit_up_reason", "reason"])
     code_col = first_existing(df, ["代码", "股票代码", "symbol", "code"])
     detail_by_code: dict[str, dict[str, Any]] = {}
     if code_col:

@@ -199,6 +199,23 @@ class DatabaseTest(unittest.TestCase):
         self.assertEqual(rows[0]["industry"], "机器人")
         self.assertEqual(rows[0]["reason"], "机器人+人工智能")
 
+    def test_limit_pool_rows_accepts_selected_reason_column(self) -> None:
+        rows = limit_pool_rows(
+            pd.DataFrame(
+                [
+                    {
+                        "代码": "600001",
+                        "连板数": 2,
+                        "所属行业": "机器人",
+                        "入选理由": "近期多次涨停",
+                    }
+                ]
+            ),
+            __import__("datetime").date(2026, 5, 29),
+        )
+
+        self.assertEqual(rows[0]["reason"], "近期多次涨停")
+
 
 if __name__ == "__main__":
     unittest.main()

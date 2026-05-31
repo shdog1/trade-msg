@@ -626,17 +626,28 @@ def render_limit_ladder_rows(items: list[dict[str, object]]) -> str:
         days = int(item.get("max_limit_up_days") or 0)
         color = limit_color(days)
         row_class = " class=\"extra-row\"" if index >= 10 else ""
+        industry = str(item.get("industry") or "")
         rows.append(
             f"<tr{row_class}>"
             f"<td><span class=\"ladder-badge\" style=\"background:{color};color:{contrast_color(days)}\">{days}板</span></td>"
             f"<td>{html.escape(str(item.get('code') or ''))}</td>"
             f"<td>{html.escape(str(item.get('name') or ''))}</td>"
-            f"<td>{html.escape(str(item.get('industry') or '-'))}</td>"
-            f"<td class=\"reason-cell\">{html.escape(str(item.get('reason') or '-'))}</td>"
+            f"<td>{html.escape(industry or '-')}</td>"
+            f"<td class=\"reason-cell\">{html.escape(limit_reason_text(item))}</td>"
             f"<td>{html.escape(str(item.get('reached_at') or ''))}</td>"
             "</tr>"
         )
     return "".join(rows)
+
+
+def limit_reason_text(item: dict[str, object]) -> str:
+    reason = str(item.get("reason") or "").strip()
+    if reason:
+        return reason
+    industry = str(item.get("industry") or "").strip()
+    if industry:
+        return f"数据源未提供具体原因；所属行业：{industry}"
+    return "数据源未提供"
 
 
 def render_limit_ladder_chart(items: list[dict[str, object]]) -> str:

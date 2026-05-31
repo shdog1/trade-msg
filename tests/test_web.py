@@ -8,6 +8,7 @@ from src.web import (
     build_backfill_command,
     build_backfill_limit_pool_command,
     limit_color,
+    limit_reason_text,
     load_limit_ladder,
     render_limit_ladder,
     render_limit_ladder_chart,
@@ -102,6 +103,13 @@ class WebConsoleTest(unittest.TestCase):
         self.assertIn("板块", content)
         self.assertIn("ladder-table", content)
         self.assertIn("ladder-badge", content)
+
+    def test_limit_reason_text_falls_back_to_industry(self) -> None:
+        self.assertEqual(
+            limit_reason_text({"industry": "机器人", "reason": None}),
+            "数据源未提供具体原因；所属行业：机器人",
+        )
+        self.assertEqual(limit_reason_text({}), "数据源未提供")
 
     def test_limit_ladder_defaults_to_top_ten_with_expand(self) -> None:
         items = [

@@ -82,6 +82,32 @@ class WebConsoleTest(unittest.TestCase):
         self.assertIn("10.50", svg)
         self.assertIn("<rect", svg)
 
+    def test_price_volume_uses_a_share_red_up_green_down(self) -> None:
+        svg = render_price_volume_svg(
+            [
+                {"close_price": 10, "turnover": 100},
+                {"close_price": 11, "turnover": 180},
+                {"close_price": 10.5, "turnover": 120},
+            ]
+        )
+
+        self.assertIn('fill="#dc2626"', svg)
+        self.assertIn('fill="#16a34a"', svg)
+
+    def test_candle_chart_renders_candles(self) -> None:
+        svg = render_price_volume_svg(
+            [
+                {"open_price": 10, "high_price": 11, "low_price": 9.5, "close_price": 10.8, "turnover": 100},
+                {"open_price": 11, "high_price": 11.2, "low_price": 10.1, "close_price": 10.3, "turnover": 180},
+            ],
+            "candle",
+        )
+
+        self.assertIn("蜡烛K线图和成交量", svg)
+        self.assertIn("<line", svg)
+        self.assertIn('fill="#dc2626"', svg)
+        self.assertIn('fill="#16a34a"', svg)
+
     def test_limit_ladder_renders_highest_streak_rows(self) -> None:
         content = render_limit_ladder(
             [

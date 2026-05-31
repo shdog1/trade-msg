@@ -112,7 +112,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/report"):
             query = parse_qs(urlparse(self.path).query)
-            self.respond_html(render_report_page(form_value(query, "ladder_date") or None))
+            self.respond_html(
+                render_report_page(
+                    form_value(query, "ladder_date") or None,
+                    form_value(query, "chart_style") or None,
+                )
+            )
             return
         if self.path == "/status":
             self.respond_json(JOB.snapshot())
@@ -369,7 +374,7 @@ window.addEventListener('load', pollStatus);
 </main></body></html>"""
 
 
-def render_report_page(ladder_date_text: str | None = None) -> str:
+def render_report_page(ladder_date_text: str | None = None, chart_style: str | None = None) -> str:
     try:
         payload = load_latest_report_payload(ladder_date_text)
     except Exception as exc:  # noqa: BLE001
@@ -385,7 +390,11 @@ def render_report_page(ladder_date_text: str | None = None) -> str:
     candidates = payload["candidates"]
     ladder = payload["limit_ladder"]
     ladder_chart = payload["limit_ladder_chart"]
-    cards = "\n".join(render_candidate_chart(item, payload["bars"].get(item["code"], [])) for item in candidates)
+    chart_style = normalize_chart_style(chart_style)
+    cards = "\n".join(
+        render_candidate_chart(item, payload["bars"].get(item["code"], []), chart_style)
+        for item in candidates
+    )
     candidate_html = cards or "<p class=\"hint\">暂无候选股。</p>"
     body = f"""
 <section>
@@ -399,7 +408,10 @@ def render_report_page(ladder_date_text: str | None = None) -> str:
 {render_limit_ladder_chart(ladder_chart)}
 </section>
 <section>
-<h2>候选股票日线与成交量</h2>
+<div class="section-head">
+  <h2>候选股票日线与成交量</h2>
+  {render_chart_style_select(chart_style, ladder_date)}
+</div>
 <div class="chart-grid">{candidate_html}</div>
 </section>
 """
@@ -444,7 +456,7 @@ def load_latest_report_payload(ladder_date_text: str | None = None) -> dict[str,
     candidates = [normalize_candidate_row(row) for row in candidate_df.to_dict("records")]
     bars = {
         item["code"]: store._read_df(
-            "SELECT trade_date, close_price, turnover FROM daily_bars "
+            "SELECT trade_date, open_price, high_price, low_price, close_price, turnover FROM daily_bars "
             "WHERE code = :code AND trade_date <= :trade_date ORDER BY trade_date DESC LIMIT 80",
             {"code": item["code"], "trade_date": trade_date},
         ).sort_values("trade_date").to_dict("records")
@@ -604,7 +616,7 @@ def parse_json_list(value: object) -> list[str]:
     return [str(parsed)]
 
 
-def render_candidate_chart(candidate: dict[str, object], bars: list[dict[str, object]]) -> str:
+def render_candidate_chart(candidate: dict[str, object], bars: list[dict[str, object]], chart_style: str = "line") -> str:
     tags = "".join(f"<span class=\"tag\">{html.escape(tag)}</span>" for tag in candidate["strategy_tags"])
     reasons = "; ".join(str(item) for item in candidate["reasons"])
     return f"""
@@ -613,11 +625,27 @@ def render_candidate_chart(candidate: dict[str, object], bars: list[dict[str, ob
   <div><strong>{html.escape(str(candidate['code']))} {html.escape(str(candidate['name']))}</strong><div>{tags}</div></div>
   <span class="score">{candidate['score']}%</span>
 </div>
-{render_price_volume_svg(bars)}
+{render_price_volume_svg(bars, chart_style)}
 <p class="hint">入场：{html.escape(str(candidate['trigger_text']))}</p>
 <p class="hint">失效：{html.escape(str(candidate['invalidation_text']))}</p>
 <p class="hint">依据：{html.escape(reasons)}</p>
 </article>
+"""
+
+
+def normalize_chart_style(value: str | None) -> str:
+    return "candle" if value == "candle" else "line"
+
+
+def render_chart_style_select(chart_style: str, ladder_date: date | object | None) -> str:
+    ladder_query = f"&ladder_date={html.escape(str(ladder_date))}" if ladder_date else ""
+    line_selected = " selected" if chart_style == "line" else ""
+    candle_selected = " selected" if chart_style == "candle" else ""
+    return f"""
+<select class="chart-style-select" onchange="location.href='/report?chart_style='+this.value+'{ladder_query}'" aria-label="选择K线样式">
+  <option value="line"{line_selected}>当前样式</option>
+  <option value="candle"{candle_selected}>蜡烛K线</option>
+</select>
 """
 
 
@@ -832,9 +860,11 @@ def truncate_label(value: str, max_chars: int) -> str:
     return value if len(value) <= max_chars else value[:max_chars] + "…"
 
 
-def render_price_volume_svg(bars: list[dict[str, object]]) -> str:
+def render_price_volume_svg(bars: list[dict[str, object]], chart_style: str = "line") -> str:
     if len(bars) < 2:
         return "<div class=\"empty-chart\">日线数据不足</div>"
+    if chart_style == "candle":
+        return render_candle_volume_svg(bars)
     closes = [float(item.get("close_price") or 0) for item in bars]
     turnovers = [float(item.get("turnover") or 0) for item in bars]
     width, height = 520, 220
@@ -852,7 +882,7 @@ def render_price_volume_svg(bars: list[dict[str, object]]) -> str:
         points.append(f"{x:.1f},{y:.1f}")
         volume = turnovers[index] if index < len(turnovers) else 0
         bar_h = 0 if max_volume <= 0 else (volume / max_volume) * (volume_bottom - volume_top)
-        color = "#16a34a" if index == 0 or close >= closes[index - 1] else "#dc2626"
+        color = price_color(index == 0 or close >= closes[index - 1])
         bars_svg.append(f"<rect x=\"{max(0, x - 2):.1f}\" y=\"{volume_bottom - bar_h:.1f}\" width=\"4\" height=\"{bar_h:.1f}\" fill=\"{color}\" opacity=\"0.55\"/>")
     last = closes[-1]
     first = closes[0]
@@ -870,6 +900,70 @@ def render_price_volume_svg(bars: list[dict[str, object]]) -> str:
 """
 
 
+def render_candle_volume_svg(bars: list[dict[str, object]]) -> str:
+    ohlc = [
+        {
+            "open": float(item.get("open_price") or item.get("close_price") or 0),
+            "high": float(item.get("high_price") or item.get("close_price") or 0),
+            "low": float(item.get("low_price") or item.get("close_price") or 0),
+            "close": float(item.get("close_price") or 0),
+            "turnover": float(item.get("turnover") or 0),
+        }
+        for item in bars
+    ]
+    width, height = 520, 220
+    price_top, price_bottom = 14, 138
+    volume_top, volume_bottom = 155, 210
+    min_price = min(item["low"] for item in ohlc)
+    max_price = max(item["high"] for item in ohlc)
+    max_volume = max(item["turnover"] for item in ohlc)
+    price_range = max(max_price - min_price, 0.01)
+    step = width / max(len(ohlc), 1)
+    candle_w = max(3, min(8, step * 0.58))
+    candles = []
+    volumes = []
+
+    def y_at(price: float) -> float:
+        return price_bottom - ((price - min_price) / price_range) * (price_bottom - price_top)
+
+    for index, item in enumerate(ohlc):
+        x = index * step + step / 2
+        up = item["close"] >= item["open"]
+        color = price_color(up)
+        high_y = y_at(item["high"])
+        low_y = y_at(item["low"])
+        open_y = y_at(item["open"])
+        close_y = y_at(item["close"])
+        body_y = min(open_y, close_y)
+        body_h = max(abs(close_y - open_y), 1.5)
+        volume_h = 0 if max_volume <= 0 else (item["turnover"] / max_volume) * (volume_bottom - volume_top)
+        candles.append(
+            f"<line x1=\"{x:.1f}\" y1=\"{high_y:.1f}\" x2=\"{x:.1f}\" y2=\"{low_y:.1f}\" stroke=\"{color}\" stroke-width=\"1.2\"/>"
+            f"<rect x=\"{x - candle_w / 2:.1f}\" y=\"{body_y:.1f}\" width=\"{candle_w:.1f}\" height=\"{body_h:.1f}\" fill=\"{color}\" opacity=\"0.78\"/>"
+        )
+        volumes.append(
+            f"<rect x=\"{x - candle_w / 2:.1f}\" y=\"{volume_bottom - volume_h:.1f}\" width=\"{candle_w:.1f}\" height=\"{volume_h:.1f}\" fill=\"{color}\" opacity=\"0.45\"/>"
+        )
+    last = ohlc[-1]["close"]
+    first = ohlc[0]["close"]
+    change = (last / first - 1) * 100 if first else 0
+    return f"""
+<svg viewBox="0 0 {width} {height}" role="img" aria-label="蜡烛K线图和成交量">
+<rect width="{width}" height="{height}" fill="#fbfcff" rx="10"/>
+<line x1="0" y1="{price_bottom}" x2="{width}" y2="{price_bottom}" stroke="#e5e7eb"/>
+<line x1="0" y1="{volume_top}" x2="{width}" y2="{volume_top}" stroke="#e5e7eb"/>
+{''.join(candles)}
+{''.join(volumes)}
+<text x="10" y="28" fill="#475467" font-size="13">收盘 {last:.2f} / 区间 {change:.1f}%</text>
+<text x="10" y="152" fill="#667085" font-size="12">成交量</text>
+</svg>
+"""
+
+
+def price_color(up: bool) -> str:
+    return "#dc2626" if up else "#16a34a"
+
+
 def base_style() -> str:
     return """
 <style>
@@ -882,7 +976,7 @@ h1{font-size:26px;margin:0} h2{font-size:18px;margin:0 0 14px} p{margin:0 0 8px}
 .hint,.status{font-size:13px;color:var(--muted)}
 section,.stock-card{background:rgba(255,255,255,.92);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 10px 30px rgba(31,43,70,.07)}
 section{margin-bottom:16px}
-.actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}.link-button{display:inline-flex;align-items:center;min-height:38px;border:1px solid #b7cbff;border-radius:10px;background:var(--blue-soft);color:#164ca5;text-decoration:none;padding:9px 13px;font-size:14px}.link-button.active{background:var(--blue);color:#fff}
+.actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}.link-button{display:inline-flex;align-items:center;min-height:38px;border:1px solid #b7cbff;border-radius:10px;background:var(--blue-soft);color:#164ca5;text-decoration:none;padding:9px 13px;font-size:14px}.link-button.active{background:var(--blue);color:#fff}.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.section-head h2{margin:0}.chart-style-select{height:32px;border:1px solid #b7cbff;border-radius:8px;background:#eaf1ff;color:#164ca5;font-weight:700;padding:4px 9px}
 .chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
 .stock-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px}.score{font-weight:700;color:#b42318}.tag{display:inline-block;background:#eaf1ff;color:#164ca5;border-radius:999px;padding:3px 8px;margin:6px 5px 0 0;font-size:12px}
 .ladder-date-select{height:28px;border:1px solid #b7cbff;border-radius:8px;background:#eaf1ff;color:#164ca5;font-weight:700;padding:3px 8px}.ladder-date-select option{font-weight:700;color:#164ca5;background:#fff}.ladder-date-select option.report-day{color:#991b1b;background:#fee2e2;font-weight:800}.ladder-date-select option.selected-day{color:#c2410c;background:#fff7ed;font-weight:900}.ladder-table{width:100%;border-collapse:collapse;margin-bottom:8px;font-size:12px}.ladder-table th,.ladder-table td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}.ladder-table th{color:#475467;background:#f8fafc;font-weight:600}.ladder-badge{display:inline-flex;align-items:center;justify-content:center;min-width:42px;border-radius:999px;padding:3px 7px;font-weight:700;font-size:11px}.reason-cell{max-width:360px;line-height:1.35}.ladder-collapse input{display:none}.ladder-collapse .extra-row{display:none}.ladder-collapse input:checked + table .extra-row{display:table-row}.ladder-collapse label{cursor:pointer;color:#b42318;font-size:12px;margin:4px 0 14px;display:inline-flex}.ladder-collapse .close-text{display:none}.ladder-collapse input:checked ~ label .open-text{display:none}.ladder-collapse input:checked ~ label .close-text{display:inline}

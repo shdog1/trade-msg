@@ -91,6 +91,19 @@ class WebConsoleTest(unittest.TestCase):
         self.assertIn("ladder-table", content)
         self.assertIn("ladder-badge", content)
 
+    def test_limit_ladder_defaults_to_top_ten_with_expand(self) -> None:
+        items = [
+            {"code": f"600{i:03d}", "name": f"Sample {i}", "max_limit_up_days": 3, "reached_at": "2026-05-29"}
+            for i in range(12)
+        ]
+
+        content = render_limit_ladder(items)
+
+        self.assertIn("展开全部 12 只", content)
+        self.assertEqual(content.count("<table class=\"ladder-table\">"), 1)
+        self.assertIn("600009", content)
+        self.assertIn("600011", content)
+
     def test_limit_ladder_uses_red_depth_palette(self) -> None:
         self.assertEqual(limit_color(2), "#fee2e2")
         self.assertEqual(limit_color(10), "#7f1d1d")

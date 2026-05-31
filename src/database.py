@@ -221,9 +221,40 @@ class MySQLStore:
             {"trade_date": trade_date, "code": code, "limit_up_days": days, "source": source}
             for code, days in limit_pool.items()
         ]
+        return self.persist_limit_pool_rows(rows)
+
+    def persist_limit_pool_rows(self, rows: list[dict[str, Any]]) -> int:
+        self.initialize()
         with self.engine.begin() as conn:
             self._upsert_many(conn, "limit_pool", rows)
         return len(rows)
+
+    def derive_limit_pool_from_daily_bars(self, trade_date: date, lookback_days: int = 40) -> int:
+        self.initialize()
+        df = self._read_df(
+            """
+            SELECT db.trade_date, db.code, db.change_pct
+            FROM daily_bars db
+            LEFT JOIN stock_basic sb ON sb.code = db.code
+            WHERE db.trade_date BETWEEN :start_date AND :trade_date
+              AND db.change_pct IS NOT NULL
+              AND (
+                  sb.is_main_board = 1
+                  OR db.code LIKE '600%%'
+                  OR db.code LIKE '601%%'
+                  OR db.code LIKE '603%%'
+                  OR db.code LIKE '605%%'
+                  OR db.code LIKE '000%%'
+                  OR db.code LIKE '001%%'
+                  OR db.code LIKE '002%%'
+                  OR db.code LIKE '003%%'
+              )
+            ORDER BY db.code, db.trade_date
+            """,
+            {"start_date": trade_date - timedelta(days=lookback_days), "trade_date": trade_date},
+        )
+        rows = derive_limit_pool_rows(df, trade_date, source="akshare")
+        return self.persist_limit_pool_rows(rows)
 
     def persist_trade_calendar(self, trade_dates: set[date], source: str = "akshare") -> int:
         self.initialize()
@@ -491,6 +522,31 @@ def daily_bar_rows(df: pd.DataFrame, code: str, source: str) -> list[dict[str, A
                 "source": source,
             }
         )
+    return rows
+
+
+def derive_limit_pool_rows(df: pd.DataFrame, trade_date: date, source: str = "akshare") -> list[dict[str, Any]]:
+    if df.empty:
+        return []
+    work = df.copy()
+    work["trade_date"] = pd.to_datetime(work["trade_date"], errors="coerce").dt.date
+    work["change_pct"] = pd.to_numeric(work["change_pct"], errors="coerce")
+    work = work.dropna(subset=["trade_date", "code", "change_pct"]).sort_values(["code", "trade_date"])
+    rows: list[dict[str, Any]] = []
+    for code, group in work.groupby("code"):
+        target = group[group["trade_date"] == trade_date]
+        if target.empty or float(target.iloc[-1]["change_pct"]) < 9.8:
+            continue
+        streak = 0
+        for item in reversed(group.to_dict("records")):
+            if item["trade_date"] > trade_date:
+                continue
+            if float(item["change_pct"]) >= 9.8:
+                streak += 1
+                continue
+            break
+        if streak:
+            rows.append({"trade_date": trade_date, "code": str(code), "limit_up_days": streak, "source": source})
     return rows
 
 

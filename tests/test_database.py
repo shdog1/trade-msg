@@ -13,6 +13,7 @@ from src.database import (
     MySQLConfig,
     candidate_to_row,
     daily_bar_rows,
+    derive_limit_pool_rows,
     stock_basic_rows,
 )
 from src.models import Candidate
@@ -151,6 +152,21 @@ class DatabaseTest(unittest.TestCase):
         self.assertEqual(to_exchange_symbol("688001"), "sh688001")
         self.assertEqual(to_exchange_symbol("000001"), "sz000001")
         self.assertEqual(to_exchange_symbol("300001"), "sz300001")
+
+    def test_derive_limit_pool_rows_counts_consecutive_limit_ups(self) -> None:
+        rows = derive_limit_pool_rows(
+            pd.DataFrame(
+                [
+                    {"trade_date": "2026-05-26", "code": "600001", "change_pct": 9.95},
+                    {"trade_date": "2026-05-27", "code": "600001", "change_pct": 10.0},
+                    {"trade_date": "2026-05-28", "code": "600001", "change_pct": 9.9},
+                    {"trade_date": "2026-05-28", "code": "000001", "change_pct": 4.0},
+                ]
+            ),
+            __import__("datetime").date(2026, 5, 28),
+        )
+
+        self.assertEqual(rows, [{"trade_date": __import__("datetime").date(2026, 5, 28), "code": "600001", "limit_up_days": 3, "source": "akshare"}])
 
 
 if __name__ == "__main__":

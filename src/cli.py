@@ -299,12 +299,25 @@ def backfill_limit_pool(store: MySQLStore, trade_date: date, days: int, request_
                 print(f"Backfilled limit pool {index}/{len(target_dates)} {item_date.isoformat()}, rows={rows}.")
             except (DatabaseError, MarketDataError) as exc:
                 message = str(exc)
-                failures.append((item_date, message))
                 try:
-                    store.record_fetch_run(item_date, "limit_pool:akshare", "failed", message)
-                except DatabaseError:
-                    pass
-                print(f"Skip limit pool {item_date.isoformat()}: {message}", file=sys.stderr)
+                    rows = store.derive_limit_pool_from_daily_bars(item_date)
+                except DatabaseError as fallback_exc:
+                    rows = 0
+                    message = f"{message}; daily_bars fallback failed: {fallback_exc}"
+                if rows:
+                    total_rows += rows
+                    store.record_fetch_run(item_date, "limit_pool:daily_bars", "success", None)
+                    print(
+                        f"Derived limit pool {index}/{len(target_dates)} {item_date.isoformat()} "
+                        f"from daily_bars, rows={rows}."
+                    )
+                else:
+                    failures.append((item_date, message))
+                    try:
+                        store.record_fetch_run(item_date, "limit_pool:akshare", "failed", message)
+                    except DatabaseError:
+                        pass
+                    print(f"Skip limit pool {item_date.isoformat()}: {message}", file=sys.stderr)
             sleep(request_sleep)
     except (DatabaseError, MarketDataError) as exc:
         print(f"Failed to backfill limit-up pool: {exc}", file=sys.stderr)

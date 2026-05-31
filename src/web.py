@@ -586,6 +586,22 @@ def render_candidate_chart(candidate: dict[str, object], bars: list[dict[str, ob
 def render_limit_ladder(items: list[dict[str, object]]) -> str:
     if not items:
         return "<div class=\"empty-chart\">暂无 2 连板以上历史数据</div>"
+    compact_rows = render_limit_ladder_rows(items[:10])
+    full_rows = render_limit_ladder_rows(items)
+    table_head = "<tr><th>最高连板</th><th>代码</th><th>名称</th><th>达到日期</th></tr>"
+    compact_table = f"<table class=\"ladder-table\">{table_head}{compact_rows}</table>"
+    if len(items) <= 10:
+        return compact_table
+    return (
+        compact_table
+        + "<details class=\"ladder-details\">"
+        + f"<summary>展开全部 {len(items)} 只</summary>"
+        + f"<table class=\"ladder-table full\">{table_head}{full_rows}</table>"
+        + "</details>"
+    )
+
+
+def render_limit_ladder_rows(items: list[dict[str, object]]) -> str:
     rows = []
     for item in items:
         days = int(item.get("max_limit_up_days") or 0)
@@ -598,12 +614,7 @@ def render_limit_ladder(items: list[dict[str, object]]) -> str:
             f"<td>{html.escape(str(item.get('reached_at') or ''))}</td>"
             "</tr>"
         )
-    return (
-        "<table class=\"ladder-table\">"
-        "<tr><th>最高连板</th><th>代码</th><th>名称</th><th>达到日期</th></tr>"
-        + "".join(rows)
-        + "</table>"
-    )
+    return "".join(rows)
 
 
 def render_limit_ladder_chart(items: list[dict[str, object]]) -> str:
@@ -785,7 +796,7 @@ section{margin-bottom:16px}
 .actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}.link-button{display:inline-flex;align-items:center;min-height:38px;border:1px solid #b7cbff;border-radius:10px;background:var(--blue-soft);color:#164ca5;text-decoration:none;padding:9px 13px;font-size:14px}.link-button.active{background:var(--blue);color:#fff}
 .chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
 .stock-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px}.score{font-weight:700;color:#b42318}.tag{display:inline-block;background:#eaf1ff;color:#164ca5;border-radius:999px;padding:3px 8px;margin:6px 5px 0 0;font-size:12px}
-.ladder-table{width:100%;border-collapse:collapse;margin-bottom:16px}.ladder-table th,.ladder-table td{border-bottom:1px solid var(--line);padding:10px;text-align:left}.ladder-table th{color:#475467;background:#f8fafc}.ladder-badge{display:inline-flex;align-items:center;justify-content:center;min-width:54px;border-radius:999px;padding:5px 10px;font-weight:700}
+.ladder-table{width:100%;border-collapse:collapse;margin-bottom:8px;font-size:12px}.ladder-table th,.ladder-table td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left}.ladder-table th{color:#475467;background:#f8fafc;font-weight:600}.ladder-badge{display:inline-flex;align-items:center;justify-content:center;min-width:42px;border-radius:999px;padding:3px 7px;font-weight:700;font-size:11px}.ladder-details{margin-bottom:14px}.ladder-details summary{cursor:pointer;color:#b42318;font-size:12px;margin:4px 0 8px}.ladder-details[open] summary::after{content:' / 收起'}
 .ladder-chart-wrap{overflow-x:auto}
 svg{width:100%;height:auto;margin:4px 0 10px}.empty-chart{height:220px;display:grid;place-items:center;background:#f8fafc;border-radius:10px;color:var(--muted)}
 @media(max-width:820px){.chart-grid{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}main{padding:16px}}

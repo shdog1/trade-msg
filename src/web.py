@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import yaml
+import pandas as pd
 
 from .config import ROOT, load_settings
 from .database import MySQLStore
@@ -380,6 +381,7 @@ def render_report_page(ladder_date_text: str | None = None) -> str:
 
     report = payload["report"]
     ladder_date = payload["ladder_date"]
+    ladder_date_options = payload["ladder_date_options"]
     candidates = payload["candidates"]
     ladder = payload["limit_ladder"]
     ladder_chart = payload["limit_ladder_chart"]
@@ -393,7 +395,7 @@ def render_report_page(ladder_date_text: str | None = None) -> str:
 <section>
 <h2>连板天梯</h2>
 <p class="hint">连板列表按所选日期统计；天梯图默认最近 10 个交易日。</p>
-{render_limit_ladder(ladder, ladder_date, report.get('trade_date'))}
+{render_limit_ladder(ladder, ladder_date, report.get('trade_date'), ladder_date_options)}
 {render_limit_ladder_chart(ladder_chart)}
 </section>
 <section>
@@ -432,6 +434,7 @@ def load_latest_report_payload(ladder_date_text: str | None = None) -> dict[str,
     trade_date = report["trade_date"]
     ladder_date = parse_optional_date(ladder_date_text) or trade_date
     ladder = load_limit_ladder(store, ladder_date)
+    ladder_date_options = load_ladder_date_options(store, trade_date, ladder_date)
     ladder_chart = load_limit_ladder_chart(store, trade_date)
     candidate_df = store._read_df(
         "SELECT code, name, strategy_tags, score, trigger_text, invalidation_text, reasons "
@@ -454,6 +457,7 @@ def load_latest_report_payload(ladder_date_text: str | None = None) -> dict[str,
         "limit_ladder": ladder,
         "limit_ladder_chart": ladder_chart,
         "ladder_date": ladder_date,
+        "ladder_date_options": ladder_date_options,
     }
 
 
@@ -487,6 +491,24 @@ def load_limit_ladder(store: MySQLStore, trade_date: date) -> list[dict[str, obj
         {"trade_date": trade_date},
     )
     return df.to_dict("records") if not df.empty else []
+
+
+def load_ladder_date_options(store: MySQLStore, report_date: date, selected_date: date) -> list[date]:
+    df = store._read_df(
+        """
+        SELECT DISTINCT trade_date
+        FROM limit_pool
+        WHERE trade_date <= :report_date
+        ORDER BY trade_date DESC
+        LIMIT 60
+        """,
+        {"report_date": report_date},
+    )
+    dates = [pd.to_datetime(item).date() for item in df["trade_date"].dropna().tolist()] if not df.empty else []
+    for item in [selected_date, report_date]:
+        if item not in dates:
+            dates.append(item)
+    return sorted(dates, reverse=True)
 
 
 def load_limit_ladder_chart(store: MySQLStore, trade_date: date) -> list[dict[str, object]]:
@@ -599,22 +621,63 @@ def render_candidate_chart(candidate: dict[str, object], bars: list[dict[str, ob
 """
 
 
-def render_limit_ladder(items: list[dict[str, object]], ladder_date: date | object | None = None, report_date: date | object | None = None) -> str:
-    header = render_ladder_header(ladder_date, report_date)
+def render_limit_ladder(
+    items: list[dict[str, object]],
+    ladder_date: date | object | None = None,
+    report_date: date | object | None = None,
+    date_options: list[date] | None = None,
+) -> str:
+    table_head = render_limit_ladder_head(ladder_date, report_date, date_options or [])
     if not items:
-        return header + "<div class=\"empty-chart\">暂无 2 连板以上历史数据</div>"
+        return f"<table class=\"ladder-table\">{table_head}</table><div class=\"empty-chart\">暂无 2 连板以上历史数据</div>"
     rows = render_limit_ladder_rows(items)
-    table_head = "<tr><th>连板</th><th>代码</th><th>名称</th><th>板块</th><th>涨停原因</th><th>日期</th></tr>"
     table = f"<table class=\"ladder-table\">{table_head}{rows}</table>"
     if len(items) <= 10:
-        return header + table
+        return table
     return (
-        header
-        + "<div class=\"ladder-collapse\">"
+        "<div class=\"ladder-collapse\">"
         "<input id=\"ladder-toggle\" type=\"checkbox\">"
         + table
         + f"<label for=\"ladder-toggle\"><span class=\"open-text\">展开全部 {len(items)} 只</span><span class=\"close-text\">收起</span></label>"
         + "</div>"
+    )
+
+
+def render_limit_ladder_head(
+    ladder_date: date | object | None,
+    report_date: date | object | None,
+    date_options: list[date],
+) -> str:
+    return (
+        "<tr><th>连板</th><th>代码</th><th>名称</th><th>板块</th><th>涨停原因</th>"
+        f"<th>{render_ladder_date_select(ladder_date, report_date, date_options)}</th></tr>"
+    )
+
+
+def render_ladder_date_select(
+    ladder_date: date | object | None,
+    report_date: date | object | None,
+    date_options: list[date],
+) -> str:
+    selected = str(ladder_date or "")
+    if not date_options and selected:
+        date_options = [date.fromisoformat(selected)]
+    options = []
+    for item in date_options:
+        value = item.isoformat()
+        selected_attr = " selected" if value == selected else ""
+        classes = ["trade-option"]
+        if value == str(report_date):
+            classes.append("report-day")
+        if value == selected:
+            classes.append("selected-day")
+        options.append(
+            f"<option class=\"{' '.join(classes)}\" value=\"{value}\"{selected_attr}>{value}</option>"
+        )
+    return (
+        "<select class=\"ladder-date-select\" "
+        "onchange=\"location.href='/report?ladder_date='+this.value\" "
+        f"aria-label=\"筛选连板日期\">{''.join(options)}</select>"
     )
 
 
@@ -641,17 +704,6 @@ def render_limit_ladder_rows(items: list[dict[str, object]]) -> str:
 def limit_reason_text(item: dict[str, object]) -> str:
     reason = str(item.get("reason") or "").strip()
     return reason
-
-
-def render_ladder_header(ladder_date: date | object | None, report_date: date | object | None) -> str:
-    selected = str(ladder_date or "")
-    badge_class = "report-day" if str(ladder_date) == str(report_date) else "other-day"
-    return f"""
-<div class="ladder-date-head">
-  <span class="trade-date-badge {badge_class}">{html.escape(selected)}</span>
-  <input class="ladder-date-input" type="date" value="{html.escape(selected)}" onchange="location.href='/report?ladder_date='+this.value">
-</div>
-"""
 
 
 def render_limit_ladder_chart(items: list[dict[str, object]]) -> str:
@@ -833,7 +885,7 @@ section{margin-bottom:16px}
 .actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}.link-button{display:inline-flex;align-items:center;min-height:38px;border:1px solid #b7cbff;border-radius:10px;background:var(--blue-soft);color:#164ca5;text-decoration:none;padding:9px 13px;font-size:14px}.link-button.active{background:var(--blue);color:#fff}
 .chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
 .stock-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px}.score{font-weight:700;color:#b42318}.tag{display:inline-block;background:#eaf1ff;color:#164ca5;border-radius:999px;padding:3px 8px;margin:6px 5px 0 0;font-size:12px}
-.ladder-date-head{display:flex;align-items:center;gap:8px;margin:8px 0 10px}.trade-date-badge{display:inline-flex;align-items:center;border-radius:999px;padding:5px 10px;font-size:12px;font-weight:700}.trade-date-badge.report-day{background:#fee2e2;color:#991b1b}.trade-date-badge.other-day{background:#fff7ed;color:#c2410c}.ladder-date-input{height:30px;border:1px solid var(--line);border-radius:8px;padding:4px 8px;color:#164ca5;background:#eaf1ff}.ladder-table{width:100%;border-collapse:collapse;margin-bottom:8px;font-size:12px}.ladder-table th,.ladder-table td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}.ladder-table th{color:#475467;background:#f8fafc;font-weight:600}.ladder-badge{display:inline-flex;align-items:center;justify-content:center;min-width:42px;border-radius:999px;padding:3px 7px;font-weight:700;font-size:11px}.reason-cell{max-width:360px;line-height:1.35}.ladder-collapse input{display:none}.ladder-collapse .extra-row{display:none}.ladder-collapse input:checked + table .extra-row{display:table-row}.ladder-collapse label{cursor:pointer;color:#b42318;font-size:12px;margin:4px 0 14px;display:inline-flex}.ladder-collapse .close-text{display:none}.ladder-collapse input:checked ~ label .open-text{display:none}.ladder-collapse input:checked ~ label .close-text{display:inline}
+.ladder-date-select{height:28px;border:1px solid #b7cbff;border-radius:8px;background:#eaf1ff;color:#164ca5;font-weight:700;padding:3px 8px}.ladder-date-select option{font-weight:700;color:#164ca5;background:#fff}.ladder-date-select option.report-day{color:#991b1b;background:#fee2e2;font-weight:800}.ladder-date-select option.selected-day{color:#c2410c;background:#fff7ed;font-weight:900}.ladder-table{width:100%;border-collapse:collapse;margin-bottom:8px;font-size:12px}.ladder-table th,.ladder-table td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}.ladder-table th{color:#475467;background:#f8fafc;font-weight:600}.ladder-badge{display:inline-flex;align-items:center;justify-content:center;min-width:42px;border-radius:999px;padding:3px 7px;font-weight:700;font-size:11px}.reason-cell{max-width:360px;line-height:1.35}.ladder-collapse input{display:none}.ladder-collapse .extra-row{display:none}.ladder-collapse input:checked + table .extra-row{display:table-row}.ladder-collapse label{cursor:pointer;color:#b42318;font-size:12px;margin:4px 0 14px;display:inline-flex}.ladder-collapse .close-text{display:none}.ladder-collapse input:checked ~ label .open-text{display:none}.ladder-collapse input:checked ~ label .close-text{display:inline}
 .ladder-chart-wrap{overflow-x:auto}
 svg{width:100%;height:auto;margin:4px 0 10px}.empty-chart{height:220px;display:grid;place-items:center;background:#f8fafc;border-radius:10px;color:var(--muted)}
 @media(max-width:820px){.chart-grid{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}main{padding:16px}}

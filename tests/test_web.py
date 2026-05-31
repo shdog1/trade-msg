@@ -120,9 +120,24 @@ class WebConsoleTest(unittest.TestCase):
         self.assertEqual(content.count("<table class=\"ladder-table\">"), 1)
         self.assertIn("extra-row", content)
         self.assertIn("ladder-toggle", content)
-        self.assertIn("ladder-date-input", content)
+        self.assertIn("ladder-date-select", content)
         self.assertIn("600009", content)
         self.assertIn("600011", content)
+
+    def test_limit_ladder_date_filter_lives_in_date_header(self) -> None:
+        day = __import__("datetime").date(2026, 5, 29)
+        previous = __import__("datetime").date(2026, 5, 28)
+        content = render_limit_ladder(
+            [{"code": "600001", "name": "Sample", "max_limit_up_days": 3, "reached_at": day}],
+            day,
+            day,
+            [day, previous],
+        )
+
+        self.assertIn("<th><select", content)
+        self.assertIn("ladder-date-select", content)
+        self.assertIn("report-day selected-day", content)
+        self.assertNotIn("trade-date-badge", content)
 
     def test_limit_ladder_uses_red_depth_palette(self) -> None:
         self.assertEqual(limit_color(2), "#fee2e2")

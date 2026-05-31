@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import subprocess
 import sys
+import threading
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import parse_qs
 
 import yaml
@@ -24,6 +26,67 @@ SCORING_KEYS = [
 ]
 
 
+@dataclass
+class JobState:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    process: subprocess.Popen[str] | None = None
+    title: str = ""
+    output: list[str] = field(default_factory=list)
+    return_code: int | None = None
+
+    def start(self, title: str, command: list[str]) -> str:
+        with self.lock:
+            if self.process and self.process.poll() is None:
+                return "已有任务正在执行。"
+            self.title = title
+            self.output = ["> " + " ".join(command)]
+            self.return_code = None
+            self.process = subprocess.Popen(
+                command,
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+            )
+            threading.Thread(target=self._reader, daemon=True).start()
+            return f"已启动：{title}"
+
+    def _reader(self) -> None:
+        process = self.process
+        if not process:
+            return
+        assert process.stdout is not None
+        for line in process.stdout:
+            with self.lock:
+                self.output.append(line.rstrip())
+        code = process.wait()
+        with self.lock:
+            self.return_code = code
+            self.output.append(f"任务结束，退出码 {code}。")
+
+    def stop(self) -> str:
+        with self.lock:
+            if not self.process or self.process.poll() is not None:
+                return "当前没有运行中的任务。"
+            self.process.terminate()
+            self.output.append("已请求中断任务。")
+            return "已请求中断。"
+
+    def snapshot(self) -> dict[str, object]:
+        with self.lock:
+            running = bool(self.process and self.process.poll() is None)
+            return {
+                "title": self.title,
+                "running": running,
+                "return_code": self.return_code,
+                "output": "\n".join(self.output[-800:]),
+            }
+
+
+JOB = JobState()
+
+
 def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
     server = ThreadingHTTPServer((host, port), ConsoleHandler)
     print(f"Trade console running at http://{host}:{port}")
@@ -32,10 +95,13 @@ def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
 
 class ConsoleHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
-        if self.path != "/":
-            self.send_error(404)
+        if self.path == "/":
+            self.respond_html(render_page(load_config(), None))
             return
-        self.respond(render_page(load_config(), None))
+        if self.path == "/status":
+            self.respond_json(JOB.snapshot())
+            return
+        self.send_error(404)
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length", "0"))
@@ -51,23 +117,32 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             elif action == "install_task":
                 update_config(config, form)
                 save_config(config)
-                message = run_command(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(TASK_SCRIPT), "-Time", form_value(form, "report_time")])
+                command = ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(TASK_SCRIPT), "-Time", form_value(form, "report_time")]
+                message = JOB.start("安装自动任务", command)
+            elif action == "stop":
+                message = JOB.stop()
             elif action in CLI_ACTIONS:
-                message = run_command([sys.executable, "-m", "src.cli", *CLI_ACTIONS[action]])
+                message = JOB.start(CLI_ACTIONS[action][0], [sys.executable, "-u", "-m", "src.cli", *CLI_ACTIONS[action][1]])
             elif action == "backfill":
-                days = form_value(form, "backfill_days") or "250"
-                sleep = form_value(form, "backfill_sleep") or "1.5"
-                message = run_command([sys.executable, "-m", "src.cli", "--backfill-days", days, "--backfill-sleep", sleep])
+                message = JOB.start("回补历史日 K", build_backfill_command(form))
             else:
                 message = "未知操作。"
         except Exception as exc:  # noqa: BLE001
             message = f"执行失败: {exc}"
-        self.respond(render_page(load_config(), message))
+        self.respond_html(render_page(load_config(), message))
 
-    def respond(self, content: str) -> None:
+    def respond_html(self, content: str) -> None:
         body = content.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def respond_json(self, payload: dict[str, object]) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -77,12 +152,38 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
 
 CLI_ACTIONS = {
-    "dry_run": ["--dry-run"],
-    "send": ["--send"],
-    "fetch_only": ["--fetch-only"],
-    "refresh_calendar": ["--refresh-calendar"],
-    "test_email": ["--test-email"],
+    "dry_run": ("生成复盘", ["--dry-run"]),
+    "send": ("发送邮件", ["--send"]),
+    "fetch_only": ("采集行情", ["--fetch-only"]),
+    "refresh_calendar": ("刷新交易日历", ["--refresh-calendar"]),
+    "test_email": ("测试邮件", ["--test-email"]),
 }
+
+
+def build_backfill_command(form: dict[str, list[str]]) -> list[str]:
+    command = [
+        sys.executable,
+        "-u",
+        "-m",
+        "src.cli",
+        "--backfill-days",
+        form_value(form, "backfill_days") or "250",
+        "--backfill-sleep",
+        form_value(form, "backfill_sleep") or "1.5",
+    ]
+    codes = split_codes(form_value(form, "backfill_stocks"))
+    for code in codes:
+        command.extend(["--backfill-stock", code])
+    return command
+
+
+def split_codes(value: str) -> list[str]:
+    codes: list[str] = []
+    for item in value.replace("，", ",").replace("\n", ",").replace(" ", ",").split(","):
+        code = item.strip()
+        if code:
+            codes.append(code)
+    return codes
 
 
 def load_config() -> dict:
@@ -103,22 +204,11 @@ def update_config(config: dict, form: dict[str, list[str]]) -> None:
     app["data_ready_time"] = form_value(form, "data_ready_time") or app.get("data_ready_time", "09:00")
     app["skip_non_trading_day"] = form_value(form, "skip_non_trading_day") == "on"
     market["max_candidates"] = int(float(form_value(form, "max_candidates") or market.get("max_candidates", 8)))
-    market["min_turnover_amount"] = int(float(form_value(form, "min_turnover_amount") or market.get("min_turnover_amount", 300000000)))
+    turnover_yi = float(form_value(form, "min_turnover_yi") or 3)
+    market["min_turnover_amount"] = int(turnover_yi * 100_000_000)
     for key, _ in SCORING_KEYS:
-        scoring[key] = float(form_value(form, key) or scoring.get(key, 0))
-
-
-def run_command(command: list[str]) -> str:
-    result = subprocess.run(
-        command,
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        timeout=3600,
-        check=False,
-    )
-    output = "\n".join(part for part in [result.stdout.strip(), result.stderr.strip()] if part)
-    return output or f"命令完成，退出码 {result.returncode}。"
+        percent = float(form_value(form, key) or 0)
+        scoring[key] = percent / 100
 
 
 def form_value(form: dict[str, list[str]], key: str) -> str:
@@ -129,14 +219,15 @@ def render_page(config: dict, message: str | None) -> str:
     app = config.get("app", {})
     market = config.get("market", {})
     scoring = config.get("scoring", {})
-    weight_total = sum(float(scoring.get(key, 0) or 0) for key, _ in SCORING_KEYS)
+    min_turnover_yi = float(market.get("min_turnover_amount", 300_000_000) or 0) / 100_000_000
+    weight_total = sum(float(scoring.get(key, 0) or 0) * 100 for key, _ in SCORING_KEYS)
     rows = "\n".join(
         f"""
-        <label>{label}<input type="number" step="0.01" min="0" name="{key}" value="{html.escape(str(scoring.get(key, '0')))}"></label>
+        <label>{label}（%）<input type="number" step="1" min="0" name="{key}" value="{html.escape(str(round(float(scoring.get(key, 0) or 0) * 100, 2)))}"></label>
         """
         for key, label in SCORING_KEYS
     )
-    message_html = f"<pre>{html.escape(message)}</pre>" if message else ""
+    message_html = f"<div class=\"notice\">{html.escape(message)}</div>" if message else ""
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -144,17 +235,28 @@ def render_page(config: dict, message: str | None) -> str:
 <title>trade-msg 控制台</title>
 <style>
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',Arial,sans-serif;margin:0;background:#f5f7fb;color:#1f2937}}
-main{{max-width:980px;margin:0 auto;padding:24px}}
+main{{max-width:1040px;margin:0 auto;padding:24px}}
 h1{{font-size:24px;margin:0 0 16px}} h2{{font-size:18px;margin:0 0 12px}}
 section{{background:#fff;border:1px solid #e5e7eb;padding:16px;margin:14px 0}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}}
 label{{display:flex;flex-direction:column;gap:6px;font-size:13px;color:#4b5563}}
 input{{padding:8px;border:1px solid #d1d5db;font-size:14px}}
 button{{padding:9px 12px;border:1px solid #1f5fbf;background:#2f6fed;color:#fff;cursor:pointer;margin:4px 6px 4px 0}}
-button.secondary{{background:#fff;color:#1f5fbf}}
-pre{{white-space:pre-wrap;background:#111827;color:#e5e7eb;padding:14px;max-height:320px;overflow:auto}}
-.hint{{font-size:13px;color:#6b7280}}
+button.secondary{{background:#fff;color:#1f5fbf}} button.danger{{background:#b42318;border-color:#b42318}}
+pre{{white-space:pre-wrap;background:#111827;color:#e5e7eb;padding:14px;min-height:180px;max-height:420px;overflow:auto}}
+.hint,.status{{font-size:13px;color:#6b7280}} .notice{{background:#ecfdf3;border:1px solid #abefc6;padding:10px;margin:10px 0}}
 </style>
+<script>
+async function pollStatus(){{
+  const res = await fetch('/status');
+  const data = await res.json();
+  document.getElementById('job-title').textContent = data.title || '无任务';
+  document.getElementById('job-state').textContent = data.running ? '运行中' : '空闲';
+  document.getElementById('job-output').textContent = data.output || '';
+}}
+setInterval(pollStatus, 1200);
+window.addEventListener('load', pollStatus);
+</script>
 </head>
 <body><main>
 <h1>trade-msg 控制台</h1>
@@ -166,13 +268,13 @@ pre{{white-space:pre-wrap;background:#111827;color:#e5e7eb;padding:14px;max-heig
 <label>自动执行时间<input name="report_time" type="time" value="{html.escape(str(app.get('report_time', '18:00')))}"></label>
 <label>数据可用时间<input name="data_ready_time" type="time" value="{html.escape(str(app.get('data_ready_time', '09:00')))}"></label>
 <label>最大候选数<input name="max_candidates" type="number" min="1" max="50" value="{html.escape(str(market.get('max_candidates', 8)))}"></label>
-<label>最低成交额<input name="min_turnover_amount" type="number" min="0" step="10000000" value="{html.escape(str(market.get('min_turnover_amount', 300000000)))}"></label>
+<label>最低成交额（亿元）<input name="min_turnover_yi" type="number" min="0" step="0.1" value="{min_turnover_yi:.2f}"></label>
 </div>
 <p><label><input name="skip_non_trading_day" type="checkbox" {'checked' if app.get('skip_non_trading_day', True) else ''}> 自动任务跳过非交易日</label></p>
 </section>
 <section>
 <h2>评分权重</h2>
-<p class="hint">当前合计：{weight_total:.2f}。系统会自动归一化，不必严格等于 1。</p>
+<p class="hint">当前合计：{weight_total:.1f}%。系统会自动归一化，不要求合计必须等于 100%。</p>
 <div class="grid">{rows}</div>
 </section>
 <section>
@@ -189,8 +291,15 @@ pre{{white-space:pre-wrap;background:#111827;color:#e5e7eb;padding:14px;max-heig
 <div class="grid">
 <label>回补天数<input name="backfill_days" type="number" min="1" value="250"></label>
 <label>请求间隔秒<input name="backfill_sleep" type="number" min="0" step="0.1" value="1.5"></label>
+<label>指定股票代码（逗号/空格分隔，可空）<input name="backfill_stocks" placeholder="600001, 000001"></label>
 </div>
-<button class="secondary" name="action" value="backfill">回补主板日 K</button>
+<button class="secondary" name="action" value="backfill">回补历史日 K</button>
+</section>
+<section>
+<h2>执行过程</h2>
+<p class="status">任务：<span id="job-title">无任务</span> | 状态：<span id="job-state">空闲</span></p>
+<button class="danger" name="action" value="stop">中断当前任务</button>
+<pre id="job-output"></pre>
 </section>
 </form>
 </main></body></html>"""

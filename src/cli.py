@@ -22,7 +22,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--send", action="store_true", help="Send report by email.")
     parser.add_argument("--fetch-only", action="store_true", help="Fetch market data into MySQL without rendering.")
     parser.add_argument("--backfill-days", type=int, default=None, help="Backfill daily bars for recent N days.")
-    parser.add_argument("--backfill-stock", default=None, help="Backfill daily bars for one stock code.")
+    parser.add_argument(
+        "--backfill-stock",
+        action="append",
+        default=None,
+        help="Backfill one or more stock codes. Can be repeated or comma-separated.",
+    )
     parser.add_argument("--backfill-all", action="store_true", help="Backfill all A-share stocks instead of main board only.")
     parser.add_argument(
         "--backfill-sleep",
@@ -74,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
             settings,
             trade_date,
             args.backfill_days,
-            args.backfill_stock,
+            parse_stock_codes(args.backfill_stock),
             max(args.backfill_sleep, 0),
             args.backfill_all,
         )
@@ -122,6 +127,18 @@ def main(argv: list[str] | None = None) -> int:
 
 def parse_trade_date(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def parse_stock_codes(values: list[str] | None) -> list[str] | None:
+    if not values:
+        return None
+    codes: list[str] = []
+    for value in values:
+        for part in value.replace("，", ",").replace(" ", ",").split(","):
+            code = part.strip()
+            if code:
+                codes.append(code)
+    return codes or None
 
 
 def refresh_trade_calendar(store: MySQLStore, trade_date: date) -> int:
@@ -183,17 +200,17 @@ def backfill_daily_bars(
     settings: Settings,
     trade_date: date,
     days: int,
-    stock_code: str | None,
+    stock_codes: list[str] | None,
     request_sleep: float = 1.0,
     include_all: bool = False,
 ) -> int:
     provider = AkshareMarketProvider()
     try:
-        codes = [stock_code] if stock_code else store.list_stock_codes(main_board_only=not include_all)
+        codes = stock_codes if stock_codes else store.list_stock_codes(main_board_only=not include_all)
         if not codes:
             basic = provider.fetch_stock_basic()
             store.persist_stock_basic(basic)
-            codes = [stock_code] if stock_code else store.list_stock_codes(main_board_only=not include_all)
+            codes = stock_codes if stock_codes else store.list_stock_codes(main_board_only=not include_all)
         start_date = trade_date - timedelta(days=max(days * 2, days + 30))
         total_rows = 0
         failures: list[tuple[str, str]] = []
@@ -213,7 +230,7 @@ def backfill_daily_bars(
                     store.record_fetch_run(trade_date, f"daily_bars:{code}", "failed", message)
                 except DatabaseError:
                     pass
-                if stock_code:
+                if stock_codes:
                     raise
                 print(f"Skip {code}: {message}", file=sys.stderr)
                 sleep(max(request_sleep, 2.0))

@@ -4,7 +4,7 @@ from datetime import date, datetime, time
 import unittest
 from unittest.mock import patch
 
-from src.cli import should_skip_scheduled_run
+from src.cli import parse_stock_codes, should_skip_scheduled_run
 from src.trading_calendar import latest_closed_trade_date
 
 
@@ -55,6 +55,9 @@ class TradingCalendarTest(unittest.TestCase):
 
         with patch("src.cli.now_in_timezone", return_value=datetime(2026, 6, 1, 18, 0)):
             self.assertFalse(should_skip_scheduled_run(store, settings))
+
+    def test_parse_stock_codes_accepts_repeated_and_comma_values(self) -> None:
+        self.assertEqual(parse_stock_codes(["600001,000001", "002001 003001"]), ["600001", "000001", "002001", "003001"])
 
 
 class FakeSettings:

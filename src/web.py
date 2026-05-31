@@ -609,8 +609,8 @@ def render_limit_ladder(items: list[dict[str, object]]) -> str:
 def render_limit_ladder_chart(items: list[dict[str, object]]) -> str:
     if len(items) < 2:
         return "<div class=\"empty-chart\">连板天梯图数据不足</div>"
-    width, height = 980, 420
-    left, right, top, bottom = 58, 36, 78, 58
+    width, height = 1120, 420
+    left, right, top, bottom = 76, 76, 78, 58
     max_days = max(int(item.get("max_limit_up_days") or 0) for item in items)
     max_days = max(2, max_days)
     min_days = 2
@@ -634,18 +634,16 @@ def render_limit_ladder_chart(items: list[dict[str, object]]) -> str:
         color = limit_color(days)
         leaders = chart_leaders(item)
         label_svg = []
-        start_y = max(18, y - 14 - (len(leaders) - 1) * 22)
+        start_y = max(16, y - 14 - (len(leaders) - 1) * 16)
         for label_index, leader in enumerate(leaders):
-            text = truncate_label(chart_label_text(leader), 8)
-            label_w = min(112, max(44, estimate_label_width(text)))
+            text = truncate_label(chart_label_text(leader), 6)
+            label_w = estimate_label_width(text)
             label_x = clamp(x, left + label_w / 2, width - right - label_w / 2)
-            label_y = start_y + label_index * 22
-            fill = limit_label_color(days, label_index)
+            label_y = start_y + label_index * 16
+            fill = limit_text_color(days, label_index)
             label_svg.append(
-                f"<rect x=\"{label_x - label_w / 2:.1f}\" y=\"{label_y - 14:.1f}\" "
-                f"width=\"{label_w:.1f}\" height=\"18\" rx=\"9\" fill=\"{fill}\"/>"
-                f"<text x=\"{label_x:.1f}\" y=\"{label_y:.1f}\" font-size=\"10\" "
-                f"fill=\"{contrast_color(days)}\" text-anchor=\"middle\">{html.escape(text)}</text>"
+                f"<text x=\"{label_x:.1f}\" y=\"{label_y:.1f}\" font-size=\"9\" "
+                f"font-weight=\"600\" fill=\"{fill}\" text-anchor=\"middle\">{html.escape(text)}</text>"
             )
         labels.append(
             f"<circle cx=\"{x:.1f}\" cy=\"{y:.1f}\" r=\"5\" fill=\"{color}\"/>"
@@ -696,17 +694,17 @@ def limit_color(days: int) -> str:
     return palette.get(min(max(days, 2), 10), "#7f1d1d")
 
 
-def limit_label_color(days: int, offset: int) -> str:
+def limit_text_color(days: int, offset: int) -> str:
     palettes = {
-        2: ["#fee2e2", "#fecaca", "#fca5a5"],
-        3: ["#fecaca", "#fca5a5", "#f87171"],
-        4: ["#fca5a5", "#f87171", "#ef4444"],
-        5: ["#f87171", "#ef4444", "#dc2626"],
-        6: ["#ef4444", "#dc2626", "#b91c1c"],
-        7: ["#dc2626", "#b91c1c", "#991b1b"],
-        8: ["#b91c1c", "#991b1b", "#7f1d1d"],
-        9: ["#991b1b", "#7f1d1d", "#651515"],
-        10: ["#7f1d1d", "#651515", "#450a0a"],
+        2: ["#ef4444", "#dc2626", "#b91c1c"],
+        3: ["#dc2626", "#b91c1c", "#991b1b"],
+        4: ["#b91c1c", "#991b1b", "#7f1d1d"],
+        5: ["#dc2626", "#b91c1c", "#991b1b"],
+        6: ["#b91c1c", "#991b1b", "#7f1d1d"],
+        7: ["#991b1b", "#7f1d1d", "#651515"],
+        8: ["#7f1d1d", "#651515", "#450a0a"],
+        9: ["#651515", "#450a0a", "#7f1d1d"],
+        10: ["#450a0a", "#651515", "#7f1d1d"],
     }
     values = palettes.get(min(max(days, 2), 10), palettes[10])
     return values[offset % len(values)]
@@ -729,9 +727,7 @@ def chart_leaders(item: dict[str, object]) -> list[dict[str, str]]:
 
 
 def chart_label_text(leader: dict[str, str]) -> str:
-    code = leader.get("code", "")
-    name = leader.get("name", "")
-    return f"{code} {name}".strip() if code else name
+    return leader.get("name", "")
 
 
 def truncate_label(value: str, max_chars: int) -> str:

@@ -125,10 +125,11 @@ class WebConsoleTest(unittest.TestCase):
             ]
         )
 
-        self.assertIn("600001 一…", content)
-        self.assertIn("600002 二…", content)
-        self.assertIn("600003 三…", content)
-        self.assertGreaterEqual(content.count("<rect x="), 4)
+        self.assertIn("一号股份", content)
+        self.assertIn("二号股份", content)
+        self.assertIn("三号股份", content)
+        self.assertNotIn("<rect x=", content)
+        self.assertIn('font-size="9"', content)
 
 
 if __name__ == "__main__":

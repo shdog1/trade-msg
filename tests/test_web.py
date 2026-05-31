@@ -84,13 +84,22 @@ class WebConsoleTest(unittest.TestCase):
     def test_limit_ladder_renders_highest_streak_rows(self) -> None:
         content = render_limit_ladder(
             [
-                {"code": "600001", "name": "Sample A", "max_limit_up_days": 5, "reached_at": "2026-05-29"},
+                {
+                    "code": "600001",
+                    "name": "Sample A",
+                    "max_limit_up_days": 5,
+                    "industry": "机器人",
+                    "reason": "机器人+人工智能",
+                    "reached_at": "2026-05-29",
+                },
                 {"code": "000001", "name": "Sample B", "max_limit_up_days": 3, "reached_at": "2026-05-20"},
             ]
         )
 
         self.assertIn("600001", content)
         self.assertIn("5", content)
+        self.assertIn("机器人+人工智能", content)
+        self.assertIn("板块", content)
         self.assertIn("ladder-table", content)
         self.assertIn("ladder-badge", content)
 
@@ -175,6 +184,8 @@ class WebConsoleTest(unittest.TestCase):
                             "code": "600001",
                             "name": "样本",
                             "max_limit_up_days": 3,
+                            "industry": "机器人",
+                            "reason": "机器人+人工智能",
                             "reached_at": params["trade_date"],
                         }
                     ]

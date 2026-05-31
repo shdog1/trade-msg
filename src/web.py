@@ -9,7 +9,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 import yaml
 
@@ -110,7 +110,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self.respond_html(render_page(load_config()))
             return
         if self.path.startswith("/report"):
-            self.respond_html(render_report_page())
+            query = parse_qs(urlparse(self.path).query)
+            self.respond_html(render_report_page(form_value(query, "ladder_date") or None))
             return
         if self.path == "/status":
             self.respond_json(JOB.snapshot())
@@ -367,9 +368,9 @@ window.addEventListener('load', pollStatus);
 </main></body></html>"""
 
 
-def render_report_page() -> str:
+def render_report_page(ladder_date_text: str | None = None) -> str:
     try:
-        payload = load_latest_report_payload()
+        payload = load_latest_report_payload(ladder_date_text)
     except Exception as exc:  # noqa: BLE001
         body = f"<section><h2>读取失败</h2><p>{html.escape(str(exc))}</p></section>"
         return render_shell("最近复盘报告", body, active_report=True)
@@ -378,6 +379,7 @@ def render_report_page() -> str:
         return render_shell("最近复盘报告", "<section><h2>暂无报告</h2><p>请先生成一次复盘。</p></section>", active_report=True)
 
     report = payload["report"]
+    ladder_date = payload["ladder_date"]
     candidates = payload["candidates"]
     ladder = payload["limit_ladder"]
     ladder_chart = payload["limit_ladder_chart"]
@@ -390,7 +392,11 @@ def render_report_page() -> str:
 </section>
 <section>
 <h2>连板天梯</h2>
-<p class="hint">主板历史最高连板，只统计 2 连板及以上。</p>
+<p class="hint">连板列表按所选日期统计；天梯图默认最近 10 个交易日。</p>
+<form method="get" class="ladder-date-form">
+  <label>列表日期<input type="date" name="ladder_date" value="{html.escape(str(ladder_date))}"></label>
+  <button type="submit" class="mini-button">切换</button>
+</form>
 {render_limit_ladder(ladder)}
 {render_limit_ladder_chart(ladder_chart)}
 </section>
@@ -419,7 +425,7 @@ def render_shell(title: str, body: str, active_report: bool = False) -> str:
 </main></body></html>"""
 
 
-def load_latest_report_payload() -> dict[str, object]:
+def load_latest_report_payload(ladder_date_text: str | None = None) -> dict[str, object]:
     settings = load_settings(CONFIG_PATH)
     store = MySQLStore.from_env(settings.raw)
     store.initialize()
@@ -428,7 +434,8 @@ def load_latest_report_payload() -> dict[str, object]:
         return {"report": None, "candidates": [], "bars": {}}
     report = dict(report_df.iloc[0].to_dict())
     trade_date = report["trade_date"]
-    ladder = load_limit_ladder(store, trade_date)
+    ladder_date = parse_optional_date(ladder_date_text) or trade_date
+    ladder = load_limit_ladder(store, ladder_date)
     ladder_chart = load_limit_ladder_chart(store, trade_date)
     candidate_df = store._read_df(
         "SELECT code, name, strategy_tags, score, trigger_text, invalidation_text, reasons "
@@ -444,7 +451,14 @@ def load_latest_report_payload() -> dict[str, object]:
         ).sort_values("trade_date").to_dict("records")
         for item in candidates
     }
-    return {"report": report, "candidates": candidates, "bars": bars, "limit_ladder": ladder, "limit_ladder_chart": ladder_chart}
+    return {
+        "report": report,
+        "candidates": candidates,
+        "bars": bars,
+        "limit_ladder": ladder,
+        "limit_ladder_chart": ladder_chart,
+        "ladder_date": ladder_date,
+    }
 
 
 def load_limit_ladder(store: MySQLStore, trade_date: date) -> list[dict[str, object]]:
@@ -453,7 +467,9 @@ def load_limit_ladder(store: MySQLStore, trade_date: date) -> list[dict[str, obj
         SELECT lp.code,
                COALESCE(sb.name, mq.name, lp.code) AS name,
                lp.limit_up_days AS max_limit_up_days,
-               lp.trade_date AS reached_at
+               lp.trade_date AS reached_at,
+               lp.industry,
+               lp.reason
         FROM limit_pool lp
         LEFT JOIN stock_basic sb ON sb.code = lp.code
         LEFT JOIN market_quotes mq ON mq.code = lp.code AND mq.trade_date = lp.trade_date
@@ -549,6 +565,15 @@ def normalize_candidate_row(row: dict[str, object]) -> dict[str, object]:
     }
 
 
+def parse_optional_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
 def parse_json_list(value: object) -> list[str]:
     if not value:
         return []
@@ -582,7 +607,7 @@ def render_limit_ladder(items: list[dict[str, object]]) -> str:
     if not items:
         return "<div class=\"empty-chart\">暂无 2 连板以上历史数据</div>"
     rows = render_limit_ladder_rows(items)
-    table_head = "<tr><th>最高连板</th><th>代码</th><th>名称</th><th>达到日期</th></tr>"
+    table_head = "<tr><th>连板</th><th>代码</th><th>名称</th><th>板块</th><th>涨停原因</th><th>日期</th></tr>"
     table = f"<table class=\"ladder-table\">{table_head}{rows}</table>"
     if len(items) <= 10:
         return table
@@ -606,6 +631,8 @@ def render_limit_ladder_rows(items: list[dict[str, object]]) -> str:
             f"<td><span class=\"ladder-badge\" style=\"background:{color};color:{contrast_color(days)}\">{days}板</span></td>"
             f"<td>{html.escape(str(item.get('code') or ''))}</td>"
             f"<td>{html.escape(str(item.get('name') or ''))}</td>"
+            f"<td>{html.escape(str(item.get('industry') or '-'))}</td>"
+            f"<td class=\"reason-cell\">{html.escape(str(item.get('reason') or '-'))}</td>"
             f"<td>{html.escape(str(item.get('reached_at') or ''))}</td>"
             "</tr>"
         )
@@ -791,7 +818,7 @@ section{margin-bottom:16px}
 .actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}.link-button{display:inline-flex;align-items:center;min-height:38px;border:1px solid #b7cbff;border-radius:10px;background:var(--blue-soft);color:#164ca5;text-decoration:none;padding:9px 13px;font-size:14px}.link-button.active{background:var(--blue);color:#fff}
 .chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
 .stock-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px}.score{font-weight:700;color:#b42318}.tag{display:inline-block;background:#eaf1ff;color:#164ca5;border-radius:999px;padding:3px 8px;margin:6px 5px 0 0;font-size:12px}
-.ladder-table{width:100%;border-collapse:collapse;margin-bottom:8px;font-size:12px}.ladder-table th,.ladder-table td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left}.ladder-table th{color:#475467;background:#f8fafc;font-weight:600}.ladder-badge{display:inline-flex;align-items:center;justify-content:center;min-width:42px;border-radius:999px;padding:3px 7px;font-weight:700;font-size:11px}.ladder-collapse input{display:none}.ladder-collapse .extra-row{display:none}.ladder-collapse input:checked + table .extra-row{display:table-row}.ladder-collapse label{cursor:pointer;color:#b42318;font-size:12px;margin:4px 0 14px;display:inline-flex}.ladder-collapse .close-text{display:none}.ladder-collapse input:checked ~ label .open-text{display:none}.ladder-collapse input:checked ~ label .close-text{display:inline}
+.ladder-date-form{display:flex;align-items:flex-end;gap:8px;margin:8px 0 10px}.ladder-date-form label{font-size:12px;color:#475467;display:flex;flex-direction:column;gap:4px}.ladder-date-form input{height:30px;border:1px solid var(--line);border-radius:8px;padding:4px 8px}.mini-button{height:30px;border:1px solid #b7cbff;border-radius:8px;background:#eaf1ff;color:#164ca5;cursor:pointer;padding:0 10px}.ladder-table{width:100%;border-collapse:collapse;margin-bottom:8px;font-size:12px}.ladder-table th,.ladder-table td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}.ladder-table th{color:#475467;background:#f8fafc;font-weight:600}.ladder-badge{display:inline-flex;align-items:center;justify-content:center;min-width:42px;border-radius:999px;padding:3px 7px;font-weight:700;font-size:11px}.reason-cell{max-width:360px;line-height:1.35}.ladder-collapse input{display:none}.ladder-collapse .extra-row{display:none}.ladder-collapse input:checked + table .extra-row{display:table-row}.ladder-collapse label{cursor:pointer;color:#b42318;font-size:12px;margin:4px 0 14px;display:inline-flex}.ladder-collapse .close-text{display:none}.ladder-collapse input:checked ~ label .open-text{display:none}.ladder-collapse input:checked ~ label .close-text{display:inline}
 .ladder-chart-wrap{overflow-x:auto}
 svg{width:100%;height:auto;margin:4px 0 10px}.empty-chart{height:220px;display:grid;place-items:center;background:#f8fafc;border-radius:10px;color:var(--muted)}
 @media(max-width:820px){.chart-grid{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}main{padding:16px}}

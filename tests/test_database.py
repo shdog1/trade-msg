@@ -14,6 +14,7 @@ from src.database import (
     candidate_to_row,
     daily_bar_rows,
     derive_limit_pool_rows,
+    limit_pool_rows,
     stock_basic_rows,
 )
 from src.models import Candidate
@@ -166,7 +167,37 @@ class DatabaseTest(unittest.TestCase):
             __import__("datetime").date(2026, 5, 28),
         )
 
-        self.assertEqual(rows, [{"trade_date": __import__("datetime").date(2026, 5, 28), "code": "600001", "limit_up_days": 3, "source": "akshare"}])
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "trade_date": __import__("datetime").date(2026, 5, 28),
+                    "code": "600001",
+                    "limit_up_days": 3,
+                    "industry": None,
+                    "reason": None,
+                    "source": "akshare",
+                }
+            ],
+        )
+
+    def test_limit_pool_rows_keeps_industry_and_reason(self) -> None:
+        rows = limit_pool_rows(
+            pd.DataFrame(
+                [
+                    {
+                        "代码": "600001",
+                        "连板数": 2,
+                        "所属行业": "机器人",
+                        "涨停原因类别": "机器人+人工智能",
+                    }
+                ]
+            ),
+            __import__("datetime").date(2026, 5, 29),
+        )
+
+        self.assertEqual(rows[0]["industry"], "机器人")
+        self.assertEqual(rows[0]["reason"], "机器人+人工智能")
 
 
 if __name__ == "__main__":

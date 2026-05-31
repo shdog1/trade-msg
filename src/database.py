@@ -89,6 +89,8 @@ class MySQLStore:
         with self.engine.begin() as conn:
             for statement in SCHEMA_SQL:
                 conn.execute(sqlalchemy.text(statement))
+            ensure_column(conn, self.config.database, "limit_pool", "industry", "VARCHAR(128) NULL")
+            ensure_column(conn, self.config.database, "limit_pool", "reason", "TEXT NULL")
             self._migrate_primary_keys_and_indexes(conn)
 
     def _migrate_primary_keys_and_indexes(self, conn: Any) -> None:
@@ -113,7 +115,7 @@ class MySQLStore:
         self.initialize()
         spot = normalize_spot(data.spot)
         hot_ranks = normalize_hot_rank(data.hot_rank)
-        limit_pool = normalize_limit_pool(data.limit_pool)
+        limit_rows = limit_pool_rows(data.limit_pool, data.trade_date, source="akshare")
         indexes = normalize_indexes(data.indexes)
         industries = normalize_topics(data.industries, top_n=200)
         concepts = normalize_topics(data.concepts, top_n=200)
@@ -137,10 +139,6 @@ class MySQLStore:
             hot_rank_rows = [
                 {"trade_date": data.trade_date, "code": code, "hot_rank": rank, "source": "akshare"}
                 for code, rank in hot_ranks.items()
-            ]
-            limit_rows = [
-                {"trade_date": data.trade_date, "code": code, "limit_up_days": days, "source": "akshare"}
-                for code, days in limit_pool.items()
             ]
             index_rows = [
                 {
@@ -216,11 +214,7 @@ class MySQLStore:
 
     def persist_limit_pool(self, df: pd.DataFrame, trade_date: date, source: str = "akshare") -> int:
         self.initialize()
-        limit_pool = normalize_limit_pool(df)
-        rows = [
-            {"trade_date": trade_date, "code": code, "limit_up_days": days, "source": source}
-            for code, days in limit_pool.items()
-        ]
+        rows = limit_pool_rows(df, trade_date, source)
         return self.persist_limit_pool_rows(rows)
 
     def persist_limit_pool_rows(self, rows: list[dict[str, Any]]) -> int:
@@ -525,6 +519,36 @@ def daily_bar_rows(df: pd.DataFrame, code: str, source: str) -> list[dict[str, A
     return rows
 
 
+def limit_pool_rows(df: pd.DataFrame, trade_date: date, source: str = "akshare") -> list[dict[str, Any]]:
+    if df.empty:
+        return []
+    limit_pool = normalize_limit_pool(df)
+    industry_col = first_existing(df, ["所属行业", "行业", "板块", "industry"])
+    reason_col = first_existing(df, ["涨停原因类别", "涨停原因", "原因", "limit_up_reason", "reason"])
+    code_col = first_existing(df, ["代码", "股票代码", "symbol", "code"])
+    detail_by_code: dict[str, dict[str, Any]] = {}
+    if code_col:
+        for item in df.to_dict("records"):
+            code = normalize_stock_code(item.get(code_col))
+            if not code:
+                continue
+            detail_by_code[code] = {
+                "industry": clean_text(item.get(industry_col)) if industry_col else None,
+                "reason": clean_text(item.get(reason_col)) if reason_col else None,
+            }
+    return [
+        {
+            "trade_date": trade_date,
+            "code": code,
+            "limit_up_days": days,
+            "industry": detail_by_code.get(code, {}).get("industry"),
+            "reason": detail_by_code.get(code, {}).get("reason"),
+            "source": source,
+        }
+        for code, days in limit_pool.items()
+    ]
+
+
 def derive_limit_pool_rows(df: pd.DataFrame, trade_date: date, source: str = "akshare") -> list[dict[str, Any]]:
     if df.empty:
         return []
@@ -546,8 +570,24 @@ def derive_limit_pool_rows(df: pd.DataFrame, trade_date: date, source: str = "ak
                 continue
             break
         if streak:
-            rows.append({"trade_date": trade_date, "code": str(code), "limit_up_days": streak, "source": source})
+            rows.append(
+                {
+                    "trade_date": trade_date,
+                    "code": str(code),
+                    "limit_up_days": streak,
+                    "industry": None,
+                    "reason": None,
+                    "source": source,
+                }
+            )
     return rows
+
+
+def clean_text(value: Any) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def first_existing(df: pd.DataFrame, names: list[str]) -> str | None:
@@ -607,6 +647,13 @@ def has_column(conn: Any, database: str, table: str, column: str) -> bool:
         {"database": database, "table": table, "column": column},
     ).scalar_one()
     return int(count) > 0
+
+
+def ensure_column(conn: Any, database: str, table: str, column: str, definition: str) -> None:
+    if has_column(conn, database, table, column):
+        return
+    sqlalchemy = require_sqlalchemy()
+    conn.execute(sqlalchemy.text(f"ALTER TABLE `{table}` ADD COLUMN `{column}` {definition}"))
 
 
 def primary_key_columns(conn: Any, database: str, table: str) -> list[str]:
@@ -858,6 +905,8 @@ SCHEMA_SQL = [
         trade_date DATE NOT NULL,
         code VARCHAR(16) NOT NULL,
         limit_up_days INT NULL,
+        industry VARCHAR(128) NULL,
+        reason TEXT NULL,
         source VARCHAR(32) NOT NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uk_limit_pool_business (trade_date, code, source),

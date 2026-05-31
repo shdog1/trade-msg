@@ -24,10 +24,10 @@ market:
   max_candidates: 8
 
 scoring:
-  market_environment: 0.20
+  market_environment: 0.15
   leader_strength: 0.25
-  strategy_fit: 0.25
-  reward_risk: 0.20
+  historical_shape: 0.30
+  intraday_confirmation: 0.20
   liquidity_risk: 0.10
 
 notify:

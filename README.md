@@ -35,6 +35,18 @@ MYSQL_CHARSET=utf8mb4
 
 ## 常用命令
 
+启动本地控制台：
+
+```powershell
+python -m src.cli --web
+```
+
+浏览器打开：
+
+```text
+http://127.0.0.1:8765
+```
+
 采集当天复盘数据并写入 MySQL：
 
 ```powershell
@@ -108,6 +120,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_task.ps1
 - 流动性：10 分，看成交额。
 
 如果某只股票历史 K 线不足，系统会保留当日强度兜底，但报告会标记“历史样本不足，按当日强度兜底”。
+
+评分权重可在本地控制台修改，保存后写入 `config.yaml`。权重会自动归一化，不要求合计必须等于 1。
 
 ## 数据表
 

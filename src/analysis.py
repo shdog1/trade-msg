@@ -405,7 +405,7 @@ def score_candidates(
             continue
 
         parts = score_parts(row, hot_rank, limit_days, market, tags, history)
-        score = max(0, min(100, round(sum(parts.values()))))
+        score = weighted_score(parts, config)
         candidates.append(
             Candidate(
                 code=code,
@@ -428,6 +428,42 @@ def score_candidates(
         )
 
     return sorted(candidates, key=lambda item: item.score, reverse=True)[:max_candidates]
+
+
+def weighted_score(parts: dict[str, int], config: dict[str, Any]) -> int:
+    max_scores = {
+        "market_environment": 15,
+        "leader_strength": 25,
+        "historical_shape": 30,
+        "intraday_confirmation": 20,
+        "liquidity_risk": 10,
+    }
+    weights = scoring_weights(config)
+    score = 0.0
+    for key, max_score in max_scores.items():
+        raw = max(0, min(max_score, parts.get(key, 0)))
+        score += (raw / max_score) * weights[key] * 100
+    return max(0, min(100, round(score)))
+
+
+def scoring_weights(config: dict[str, Any]) -> dict[str, float]:
+    defaults = {
+        "market_environment": 0.15,
+        "leader_strength": 0.25,
+        "historical_shape": 0.30,
+        "intraday_confirmation": 0.20,
+        "liquidity_risk": 0.10,
+    }
+    raw = config.get("scoring", {})
+    weights = {
+        key: _optional_float(raw.get(key)) if key in raw else value
+        for key, value in defaults.items()
+    }
+    cleaned = {key: value if value is not None and value >= 0 else defaults[key] for key, value in weights.items()}
+    total = sum(cleaned.values())
+    if total <= 0:
+        return defaults
+    return {key: value / total for key, value in cleaned.items()}
 
 
 def strategy_tags(

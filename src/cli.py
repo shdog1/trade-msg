@@ -33,10 +33,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--date", default=None, help="Trade date to recap, e.g. 2026-05-29.")
     parser.add_argument("--scheduled", action="store_true", help="Skip automatically when today is not a trading day.")
     parser.add_argument("--refresh-calendar", action="store_true", help="Fetch and store the A-share trading calendar.")
+    parser.add_argument("--web", action="store_true", help="Run local web console.")
     parser.add_argument("--test-email", action="store_true", help="Send a test email without fetching data.")
     args = parser.parse_args(argv)
 
     settings = load_settings(args.config)
+    if args.web:
+        from .web import run_server
+
+        run_server()
+        return 0
+
     if args.test_email:
         return send_test_email(settings.push_title_prefix)
 

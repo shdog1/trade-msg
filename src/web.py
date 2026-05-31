@@ -610,7 +610,7 @@ def render_limit_ladder_chart(items: list[dict[str, object]]) -> str:
     if len(items) < 2:
         return "<div class=\"empty-chart\">连板天梯图数据不足</div>"
     width, height = 1120, 420
-    left, right, top, bottom = 76, 76, 78, 58
+    left, right, top, bottom = 140, 140, 78, 58
     max_days = max(int(item.get("max_limit_up_days") or 0) for item in items)
     max_days = max(2, max_days)
     min_days = 2
@@ -637,12 +637,10 @@ def render_limit_ladder_chart(items: list[dict[str, object]]) -> str:
         start_y = max(16, y - 14 - (len(leaders) - 1) * 16)
         for label_index, leader in enumerate(leaders):
             text = truncate_label(chart_label_text(leader), 6)
-            label_w = estimate_label_width(text)
-            label_x = clamp(x, left + label_w / 2, width - right - label_w / 2)
             label_y = start_y + label_index * 16
             fill = limit_text_color(days, label_index)
             label_svg.append(
-                f"<text x=\"{label_x:.1f}\" y=\"{label_y:.1f}\" font-size=\"9\" "
+                f"<text x=\"{x:.1f}\" y=\"{label_y:.1f}\" font-size=\"9\" "
                 f"font-weight=\"600\" fill=\"{fill}\" text-anchor=\"middle\">{html.escape(text)}</text>"
             )
         labels.append(
@@ -732,17 +730,6 @@ def chart_label_text(leader: dict[str, str]) -> str:
 
 def truncate_label(value: str, max_chars: int) -> str:
     return value if len(value) <= max_chars else value[:max_chars] + "…"
-
-
-def estimate_label_width(value: str) -> int:
-    width = 16
-    for char in value:
-        width += 11 if ord(char) > 127 else 6
-    return width
-
-
-def clamp(value: float, lower: float, upper: float) -> float:
-    return max(lower, min(upper, value))
 
 
 def render_price_volume_svg(bars: list[dict[str, object]]) -> str:

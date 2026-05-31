@@ -131,6 +131,20 @@ class WebConsoleTest(unittest.TestCase):
         self.assertNotIn("<rect x=", content)
         self.assertIn('font-size="9"', content)
 
+    def test_limit_ladder_chart_labels_are_centered_on_edge_points(self) -> None:
+        content = render_limit_ladder_chart(
+            [
+                {"trade_date": "2026-05-26", "max_limit_up_days": 8, "names": "左边界"},
+                {"trade_date": "2026-05-27", "max_limit_up_days": 3, "names": "中间"},
+                {"trade_date": "2026-05-28", "max_limit_up_days": 9, "names": "右边界"},
+            ]
+        )
+
+        self.assertIn('cx="140.0"', content)
+        self.assertIn('x="140.0"', content)
+        self.assertIn('cx="980.0"', content)
+        self.assertIn('x="980.0"', content)
+
 
 if __name__ == "__main__":
     unittest.main()

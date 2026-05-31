@@ -104,12 +104,9 @@ class WebConsoleTest(unittest.TestCase):
         self.assertIn("ladder-table", content)
         self.assertIn("ladder-badge", content)
 
-    def test_limit_reason_text_falls_back_to_industry(self) -> None:
-        self.assertEqual(
-            limit_reason_text({"industry": "机器人", "reason": None}),
-            "数据源未提供具体原因；所属行业：机器人",
-        )
-        self.assertEqual(limit_reason_text({}), "数据源未提供")
+    def test_limit_reason_text_returns_empty_when_missing(self) -> None:
+        self.assertEqual(limit_reason_text({"industry": "机器人", "reason": None}), "")
+        self.assertEqual(limit_reason_text({}), "")
 
     def test_limit_ladder_defaults_to_top_ten_with_expand(self) -> None:
         items = [
@@ -123,6 +120,7 @@ class WebConsoleTest(unittest.TestCase):
         self.assertEqual(content.count("<table class=\"ladder-table\">"), 1)
         self.assertIn("extra-row", content)
         self.assertIn("ladder-toggle", content)
+        self.assertIn("ladder-date-input", content)
         self.assertIn("600009", content)
         self.assertIn("600011", content)
 

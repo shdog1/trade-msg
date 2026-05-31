@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.web import build_backfill_command, render_limit_ladder, render_price_volume_svg, split_codes, update_config
+from src.web import build_backfill_command, render_limit_ladder, render_limit_ladder_chart, render_price_volume_svg, split_codes, update_config
 
 
 class WebConsoleTest(unittest.TestCase):
@@ -67,6 +67,20 @@ class WebConsoleTest(unittest.TestCase):
         self.assertIn("600001", content)
         self.assertIn("5", content)
         self.assertIn("ladder-table", content)
+        self.assertIn("ladder-badge", content)
+
+    def test_limit_ladder_chart_renders_connected_points(self) -> None:
+        content = render_limit_ladder_chart(
+            [
+                {"trade_date": "2026-05-27", "max_limit_up_days": 3, "names": "A"},
+                {"trade_date": "2026-05-28", "max_limit_up_days": 5, "names": "B"},
+                {"trade_date": "2026-05-29", "max_limit_up_days": 4, "names": "C"},
+            ]
+        )
+
+        self.assertIn("<polyline", content)
+        self.assertIn("5板", content)
+        self.assertIn("90日连板天梯图", content)
 
 
 if __name__ == "__main__":

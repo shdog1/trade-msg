@@ -360,6 +360,7 @@ def render_report_page() -> str:
     report = payload["report"]
     candidates = payload["candidates"]
     ladder = payload["limit_ladder"]
+    ladder_chart = payload["limit_ladder_chart"]
     cards = "\n".join(render_candidate_chart(item, payload["bars"].get(item["code"], [])) for item in candidates)
     candidate_html = cards or "<p class=\"hint\">暂无候选股。</p>"
     body = f"""
@@ -371,6 +372,7 @@ def render_report_page() -> str:
 <h2>连板天梯</h2>
 <p class="hint">主板历史最高连板，只统计 2 连板及以上。</p>
 {render_limit_ladder(ladder)}
+{render_limit_ladder_chart(ladder_chart)}
 </section>
 <section>
 <h2>候选股票日线与成交量</h2>
@@ -407,6 +409,7 @@ def load_latest_report_payload() -> dict[str, object]:
     report = dict(report_df.iloc[0].to_dict())
     trade_date = report["trade_date"]
     ladder = load_limit_ladder(store, trade_date)
+    ladder_chart = load_limit_ladder_chart(store, trade_date)
     candidate_df = store._read_df(
         "SELECT code, name, strategy_tags, score, trigger_text, invalidation_text, reasons "
         "FROM recap_candidates WHERE trade_date = :trade_date ORDER BY score DESC",
@@ -421,7 +424,7 @@ def load_latest_report_payload() -> dict[str, object]:
         ).sort_values("trade_date").to_dict("records")
         for item in candidates
     }
-    return {"report": report, "candidates": candidates, "bars": bars, "limit_ladder": ladder}
+    return {"report": report, "candidates": candidates, "bars": bars, "limit_ladder": ladder, "limit_ladder_chart": ladder_chart}
 
 
 def load_limit_ladder(store: MySQLStore, trade_date: date) -> list[dict[str, object]]:
@@ -457,6 +460,62 @@ def load_limit_ladder(store: MySQLStore, trade_date: date) -> list[dict[str, obj
         {"trade_date": trade_date},
     )
     return df.to_dict("records") if not df.empty else []
+
+
+def load_limit_ladder_chart(store: MySQLStore, trade_date: date) -> list[dict[str, object]]:
+    date_df = store._read_df(
+        "SELECT trade_date FROM trade_calendar WHERE is_open = 1 AND trade_date <= :trade_date "
+        "ORDER BY trade_date DESC LIMIT 90",
+        {"trade_date": trade_date},
+    )
+    if date_df.empty:
+        date_df = store._read_df(
+            "SELECT DISTINCT trade_date FROM limit_pool WHERE trade_date <= :trade_date ORDER BY trade_date DESC LIMIT 90",
+            {"trade_date": trade_date},
+        )
+    if date_df.empty:
+        return []
+    dates = sorted(date_df["trade_date"].tolist())
+    df = store._read_df(
+        """
+        SELECT lp.trade_date,
+               lp.code,
+               COALESCE(sb.name, mq.name, lp.code) AS name,
+               lp.limit_up_days
+        FROM limit_pool lp
+        LEFT JOIN stock_basic sb ON sb.code = lp.code
+        LEFT JOIN market_quotes mq ON mq.code = lp.code AND mq.trade_date = lp.trade_date
+        WHERE lp.trade_date BETWEEN :start_date AND :trade_date
+          AND lp.limit_up_days >= 2
+          AND (
+              sb.is_main_board = 1
+              OR lp.code LIKE '600%%'
+              OR lp.code LIKE '601%%'
+              OR lp.code LIKE '603%%'
+              OR lp.code LIKE '605%%'
+              OR lp.code LIKE '000%%'
+              OR lp.code LIKE '001%%'
+              OR lp.code LIKE '002%%'
+              OR lp.code LIKE '003%%'
+          )
+        ORDER BY lp.trade_date, lp.limit_up_days DESC
+        """,
+        {"start_date": dates[0], "trade_date": dates[-1]},
+    )
+    if df.empty:
+        return []
+    result: list[dict[str, object]] = []
+    for item_date, group in df.groupby("trade_date"):
+        max_days = int(group["limit_up_days"].max())
+        leaders = group[group["limit_up_days"] == max_days].head(3)
+        result.append(
+            {
+                "trade_date": item_date,
+                "max_limit_up_days": max_days,
+                "names": "、".join(str(item) for item in leaders["name"].tolist()),
+            }
+        )
+    return result
 
 
 def normalize_candidate_row(row: dict[str, object]) -> dict[str, object]:
@@ -505,9 +564,11 @@ def render_limit_ladder(items: list[dict[str, object]]) -> str:
         return "<div class=\"empty-chart\">暂无 2 连板以上历史数据</div>"
     rows = []
     for item in items:
+        days = int(item.get("max_limit_up_days") or 0)
+        color = limit_color(days)
         rows.append(
             "<tr>"
-            f"<td class=\"ladder-level\">{int(item.get('max_limit_up_days') or 0)}板</td>"
+            f"<td><span class=\"ladder-badge\" style=\"background:{color};color:{contrast_color(days)}\">{days}板</span></td>"
             f"<td>{html.escape(str(item.get('code') or ''))}</td>"
             f"<td>{html.escape(str(item.get('name') or ''))}</td>"
             f"<td>{html.escape(str(item.get('reached_at') or ''))}</td>"
@@ -519,6 +580,86 @@ def render_limit_ladder(items: list[dict[str, object]]) -> str:
         + "".join(rows)
         + "</table>"
     )
+
+
+def render_limit_ladder_chart(items: list[dict[str, object]]) -> str:
+    if len(items) < 2:
+        return "<div class=\"empty-chart\">连板天梯图数据不足</div>"
+    width, height = 980, 360
+    left, right, top, bottom = 58, 24, 28, 58
+    max_days = max(int(item.get("max_limit_up_days") or 0) for item in items)
+    max_days = max(2, max_days)
+    min_days = 2
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    x_step = plot_w / max(len(items) - 1, 1)
+
+    def x_at(index: int) -> float:
+        return left + index * x_step
+
+    def y_at(days: int) -> float:
+        return top + (max_days - days) / max(max_days - min_days, 1) * plot_h
+
+    points = []
+    labels = []
+    for index, item in enumerate(items):
+        days = int(item.get("max_limit_up_days") or 0)
+        x = x_at(index)
+        y = y_at(days)
+        points.append(f"{x:.1f},{y:.1f}")
+        color = limit_color(days)
+        name = html.escape(str(item.get("names") or ""))
+        labels.append(
+            f"<circle cx=\"{x:.1f}\" cy=\"{y:.1f}\" r=\"5\" fill=\"{color}\"/>"
+            f"<text x=\"{x + 6:.1f}\" y=\"{y - 7:.1f}\" font-size=\"11\" fill=\"#344054\">{name}</text>"
+        )
+
+    grid = []
+    for days in range(min_days, max_days + 1):
+        y = y_at(days)
+        grid.append(
+            f"<line x1=\"{left}\" y1=\"{y:.1f}\" x2=\"{width - right}\" y2=\"{y:.1f}\" stroke=\"#e5e7eb\"/>"
+            f"<text x=\"12\" y=\"{y + 4:.1f}\" font-size=\"12\" fill=\"#667085\">{days}板</text>"
+        )
+    date_labels = []
+    label_step = max(1, len(items) // 6)
+    for index, item in enumerate(items):
+        if index % label_step != 0 and index != len(items) - 1:
+            continue
+        x = x_at(index)
+        date_labels.append(
+            f"<text x=\"{x:.1f}\" y=\"{height - 20}\" font-size=\"11\" fill=\"#667085\" text-anchor=\"middle\">{html.escape(str(item.get('trade_date'))[5:])}</text>"
+        )
+    return f"""
+<div class="ladder-chart-wrap">
+<svg viewBox="0 0 {width} {height}" role="img" aria-label="90日连板天梯图">
+<rect width="{width}" height="{height}" fill="#fbfcff" rx="12"/>
+{''.join(grid)}
+<polyline points="{' '.join(points)}" fill="none" stroke="#2f6fed" stroke-width="2.4"/>
+{''.join(labels)}
+{''.join(date_labels)}
+</svg>
+</div>
+"""
+
+
+def limit_color(days: int) -> str:
+    palette = {
+        2: "#dbeafe",
+        3: "#bfdbfe",
+        4: "#93c5fd",
+        5: "#60a5fa",
+        6: "#3b82f6",
+        7: "#2563eb",
+        8: "#1d4ed8",
+        9: "#1e40af",
+        10: "#1e3a8a",
+    }
+    return palette.get(min(max(days, 2), 10), "#1e3a8a")
+
+
+def contrast_color(days: int) -> str:
+    return "#172033" if days <= 4 else "#ffffff"
 
 
 def render_price_volume_svg(bars: list[dict[str, object]]) -> str:
@@ -574,7 +715,8 @@ section{margin-bottom:16px}
 .actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}.link-button{display:inline-flex;align-items:center;min-height:38px;border:1px solid #b7cbff;border-radius:10px;background:var(--blue-soft);color:#164ca5;text-decoration:none;padding:9px 13px;font-size:14px}.link-button.active{background:var(--blue);color:#fff}
 .chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
 .stock-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px}.score{font-weight:700;color:#b42318}.tag{display:inline-block;background:#eaf1ff;color:#164ca5;border-radius:999px;padding:3px 8px;margin:6px 5px 0 0;font-size:12px}
-.ladder-table{width:100%;border-collapse:collapse}.ladder-table th,.ladder-table td{border-bottom:1px solid var(--line);padding:10px;text-align:left}.ladder-table th{color:#475467;background:#f8fafc}.ladder-level{font-weight:700;color:#b42318}
+.ladder-table{width:100%;border-collapse:collapse;margin-bottom:16px}.ladder-table th,.ladder-table td{border-bottom:1px solid var(--line);padding:10px;text-align:left}.ladder-table th{color:#475467;background:#f8fafc}.ladder-badge{display:inline-flex;align-items:center;justify-content:center;min-width:54px;border-radius:999px;padding:5px 10px;font-weight:700}
+.ladder-chart-wrap{overflow-x:auto}
 svg{width:100%;height:auto;margin:4px 0 10px}.empty-chart{height:220px;display:grid;place-items:center;background:#f8fafc;border-radius:10px;color:var(--muted)}
 @media(max-width:820px){.chart-grid{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}main{padding:16px}}
 </style>

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import unittest
 
+import pandas as pd
+
 from src.web import (
     build_backfill_command,
     build_backfill_limit_pool_command,
     limit_color,
+    load_limit_ladder,
     render_limit_ladder,
     render_limit_ladder_chart,
     render_price_volume_svg,
@@ -101,6 +104,8 @@ class WebConsoleTest(unittest.TestCase):
 
         self.assertIn("展开全部 12 只", content)
         self.assertEqual(content.count("<table class=\"ladder-table\">"), 1)
+        self.assertIn("extra-row", content)
+        self.assertIn("ladder-toggle", content)
         self.assertIn("600009", content)
         self.assertIn("600011", content)
 
@@ -119,7 +124,7 @@ class WebConsoleTest(unittest.TestCase):
 
         self.assertIn("<polyline", content)
         self.assertIn("5板", content)
-        self.assertIn("90日连板天梯图", content)
+        self.assertIn("10日连板天梯图", content)
 
     def test_limit_ladder_chart_stacks_multiple_leaders_above_point(self) -> None:
         content = render_limit_ladder_chart(
@@ -157,6 +162,30 @@ class WebConsoleTest(unittest.TestCase):
         self.assertIn('x="140.0"', content)
         self.assertIn('cx="980.0"', content)
         self.assertIn('x="980.0"', content)
+
+    def test_load_limit_ladder_queries_only_target_trade_date(self) -> None:
+        class Store:
+            sql = ""
+
+            def _read_df(self, sql: str, params: dict[str, object]) -> pd.DataFrame:
+                self.sql = sql
+                return pd.DataFrame(
+                    [
+                        {
+                            "code": "600001",
+                            "name": "样本",
+                            "max_limit_up_days": 3,
+                            "reached_at": params["trade_date"],
+                        }
+                    ]
+                )
+
+        store = Store()
+        rows = load_limit_ladder(store, __import__("datetime").date(2026, 5, 29))  # type: ignore[arg-type]
+
+        self.assertEqual(rows[0]["code"], "600001")
+        self.assertIn("lp.trade_date = :trade_date", store.sql)
+        self.assertNotIn("lp.trade_date <= :trade_date", store.sql)
 
 
 if __name__ == "__main__":

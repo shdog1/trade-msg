@@ -450,32 +450,27 @@ def load_latest_report_payload() -> dict[str, object]:
 def load_limit_ladder(store: MySQLStore, trade_date: date) -> list[dict[str, object]]:
     df = store._read_df(
         """
-        SELECT ranked.code,
-               COALESCE(sb.name, mq.name, ranked.code) AS name,
-               ranked.limit_up_days AS max_limit_up_days,
-               ranked.trade_date AS reached_at
-        FROM (
-            SELECT lp.*,
-                   ROW_NUMBER() OVER (PARTITION BY lp.code ORDER BY lp.limit_up_days DESC, lp.trade_date DESC) AS rn
-            FROM limit_pool lp
-            WHERE lp.trade_date <= :trade_date AND lp.limit_up_days >= 2
-        ) ranked
-        LEFT JOIN stock_basic sb ON sb.code = ranked.code
-        LEFT JOIN market_quotes mq ON mq.code = ranked.code AND mq.trade_date = ranked.trade_date
-        WHERE ranked.rn = 1
+        SELECT lp.code,
+               COALESCE(sb.name, mq.name, lp.code) AS name,
+               lp.limit_up_days AS max_limit_up_days,
+               lp.trade_date AS reached_at
+        FROM limit_pool lp
+        LEFT JOIN stock_basic sb ON sb.code = lp.code
+        LEFT JOIN market_quotes mq ON mq.code = lp.code AND mq.trade_date = lp.trade_date
+        WHERE lp.trade_date = :trade_date
+          AND lp.limit_up_days >= 2
           AND (
               sb.is_main_board = 1
-              OR ranked.code LIKE '600%%'
-              OR ranked.code LIKE '601%%'
-              OR ranked.code LIKE '603%%'
-              OR ranked.code LIKE '605%%'
-              OR ranked.code LIKE '000%%'
-              OR ranked.code LIKE '001%%'
-              OR ranked.code LIKE '002%%'
-              OR ranked.code LIKE '003%%'
+              OR lp.code LIKE '600%%'
+              OR lp.code LIKE '601%%'
+              OR lp.code LIKE '603%%'
+              OR lp.code LIKE '605%%'
+              OR lp.code LIKE '000%%'
+              OR lp.code LIKE '001%%'
+              OR lp.code LIKE '002%%'
+              OR lp.code LIKE '003%%'
           )
-        ORDER BY ranked.limit_up_days DESC, ranked.trade_date DESC
-        LIMIT 30
+        ORDER BY lp.limit_up_days DESC, lp.code
         """,
         {"trade_date": trade_date},
     )
@@ -485,12 +480,12 @@ def load_limit_ladder(store: MySQLStore, trade_date: date) -> list[dict[str, obj
 def load_limit_ladder_chart(store: MySQLStore, trade_date: date) -> list[dict[str, object]]:
     date_df = store._read_df(
         "SELECT trade_date FROM trade_calendar WHERE is_open = 1 AND trade_date <= :trade_date "
-        "ORDER BY trade_date DESC LIMIT 90",
+        "ORDER BY trade_date DESC LIMIT 10",
         {"trade_date": trade_date},
     )
     if date_df.empty:
         date_df = store._read_df(
-            "SELECT DISTINCT trade_date FROM limit_pool WHERE trade_date <= :trade_date ORDER BY trade_date DESC LIMIT 90",
+            "SELECT DISTINCT trade_date FROM limit_pool WHERE trade_date <= :trade_date ORDER BY trade_date DESC LIMIT 10",
             {"trade_date": trade_date},
         )
     if date_df.empty:
@@ -586,28 +581,28 @@ def render_candidate_chart(candidate: dict[str, object], bars: list[dict[str, ob
 def render_limit_ladder(items: list[dict[str, object]]) -> str:
     if not items:
         return "<div class=\"empty-chart\">暂无 2 连板以上历史数据</div>"
-    compact_rows = render_limit_ladder_rows(items[:10])
-    full_rows = render_limit_ladder_rows(items)
+    rows = render_limit_ladder_rows(items)
     table_head = "<tr><th>最高连板</th><th>代码</th><th>名称</th><th>达到日期</th></tr>"
-    compact_table = f"<table class=\"ladder-table\">{table_head}{compact_rows}</table>"
+    table = f"<table class=\"ladder-table\">{table_head}{rows}</table>"
     if len(items) <= 10:
-        return compact_table
+        return table
     return (
-        compact_table
-        + "<details class=\"ladder-details\">"
-        + f"<summary>展开全部 {len(items)} 只</summary>"
-        + f"<table class=\"ladder-table full\">{table_head}{full_rows}</table>"
-        + "</details>"
+        "<div class=\"ladder-collapse\">"
+        "<input id=\"ladder-toggle\" type=\"checkbox\">"
+        + table
+        + f"<label for=\"ladder-toggle\"><span class=\"open-text\">展开全部 {len(items)} 只</span><span class=\"close-text\">收起</span></label>"
+        + "</div>"
     )
 
 
 def render_limit_ladder_rows(items: list[dict[str, object]]) -> str:
     rows = []
-    for item in items:
+    for index, item in enumerate(items):
         days = int(item.get("max_limit_up_days") or 0)
         color = limit_color(days)
+        row_class = " class=\"extra-row\"" if index >= 10 else ""
         rows.append(
-            "<tr>"
+            f"<tr{row_class}>"
             f"<td><span class=\"ladder-badge\" style=\"background:{color};color:{contrast_color(days)}\">{days}板</span></td>"
             f"<td>{html.escape(str(item.get('code') or ''))}</td>"
             f"<td>{html.escape(str(item.get('name') or ''))}</td>"
@@ -677,7 +672,7 @@ def render_limit_ladder_chart(items: list[dict[str, object]]) -> str:
         )
     return f"""
 <div class="ladder-chart-wrap">
-<svg viewBox="0 0 {width} {height}" role="img" aria-label="90日连板天梯图">
+<svg viewBox="0 0 {width} {height}" role="img" aria-label="10日连板天梯图">
 <rect width="{width}" height="{height}" fill="#fbfcff" rx="12"/>
 {''.join(grid)}
 <polyline points="{' '.join(points)}" fill="none" stroke="#dc2626" stroke-width="2.4"/>
@@ -796,7 +791,7 @@ section{margin-bottom:16px}
 .actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}.link-button{display:inline-flex;align-items:center;min-height:38px;border:1px solid #b7cbff;border-radius:10px;background:var(--blue-soft);color:#164ca5;text-decoration:none;padding:9px 13px;font-size:14px}.link-button.active{background:var(--blue);color:#fff}
 .chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
 .stock-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px}.score{font-weight:700;color:#b42318}.tag{display:inline-block;background:#eaf1ff;color:#164ca5;border-radius:999px;padding:3px 8px;margin:6px 5px 0 0;font-size:12px}
-.ladder-table{width:100%;border-collapse:collapse;margin-bottom:8px;font-size:12px}.ladder-table th,.ladder-table td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left}.ladder-table th{color:#475467;background:#f8fafc;font-weight:600}.ladder-badge{display:inline-flex;align-items:center;justify-content:center;min-width:42px;border-radius:999px;padding:3px 7px;font-weight:700;font-size:11px}.ladder-details{margin-bottom:14px}.ladder-details summary{cursor:pointer;color:#b42318;font-size:12px;margin:4px 0 8px}.ladder-details[open] summary::after{content:' / 收起'}
+.ladder-table{width:100%;border-collapse:collapse;margin-bottom:8px;font-size:12px}.ladder-table th,.ladder-table td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left}.ladder-table th{color:#475467;background:#f8fafc;font-weight:600}.ladder-badge{display:inline-flex;align-items:center;justify-content:center;min-width:42px;border-radius:999px;padding:3px 7px;font-weight:700;font-size:11px}.ladder-collapse input{display:none}.ladder-collapse .extra-row{display:none}.ladder-collapse input:checked + table .extra-row{display:table-row}.ladder-collapse label{cursor:pointer;color:#b42318;font-size:12px;margin:4px 0 14px;display:inline-flex}.ladder-collapse .close-text{display:none}.ladder-collapse input:checked ~ label .open-text{display:none}.ladder-collapse input:checked ~ label .close-text{display:inline}
 .ladder-chart-wrap{overflow-x:auto}
 svg{width:100%;height:auto;margin:4px 0 10px}.empty-chart{height:220px;display:grid;place-items:center;background:#f8fafc;border-radius:10px;color:var(--muted)}
 @media(max-width:820px){.chart-grid{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}main{padding:16px}}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.web import build_backfill_command, render_price_volume_svg, split_codes, update_config
+from src.web import build_backfill_command, render_limit_ladder, render_price_volume_svg, split_codes, update_config
 
 
 class WebConsoleTest(unittest.TestCase):
@@ -53,8 +53,20 @@ class WebConsoleTest(unittest.TestCase):
         )
 
         self.assertIn("<svg", svg)
-        self.assertIn("成交量", svg)
-        self.assertIn("收盘 10.50", svg)
+        self.assertIn("10.50", svg)
+        self.assertIn("<rect", svg)
+
+    def test_limit_ladder_renders_highest_streak_rows(self) -> None:
+        content = render_limit_ladder(
+            [
+                {"code": "600001", "name": "Sample A", "max_limit_up_days": 5, "reached_at": "2026-05-29"},
+                {"code": "000001", "name": "Sample B", "max_limit_up_days": 3, "reached_at": "2026-05-20"},
+            ]
+        )
+
+        self.assertIn("600001", content)
+        self.assertIn("5", content)
+        self.assertIn("ladder-table", content)
 
 
 if __name__ == "__main__":

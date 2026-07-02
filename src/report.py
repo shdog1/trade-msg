@@ -2,19 +2,19 @@ from __future__ import annotations
 
 from html import escape
 
-from .analysis import TEXT, format_amount
+from .analysis import format_amount
 from .models import Candidate, HotTopic, IndexSnapshot, Recap
 
 
 LABELS = {
-    "disclaimer": "\u4ec5\u7528\u4e8e\u590d\u76d8\u7814\u7a76\uff0c\u4e0d\u6784\u6210\u6295\u8d44\u5efa\u8bae\u3002\u63a8\u8350\u503c\u4ee3\u8868\u89c2\u5bdf\u4f18\u5148\u7ea7\u3002",
-    "market": "\u5e02\u573a\u6982\u89c8",
-    "indexes": "\u6307\u6570",
-    "hot": "\u70ed\u70b9\u4e0e\u9f99\u5934",
-    "opportunity": "\u77ed\u7ebf\u673a\u4f1a",
-    "notes": "\u6570\u636e\u63d0\u793a",
-    "discipline": "\u660e\u65e5\u6267\u884c\u7eaa\u5f8b",
-    "none": "\u6682\u65e0\u7b26\u5408\u5f53\u524d\u89c4\u5219\u7684\u5019\u9009\u3002",
+    "disclaimer": "仅用于复盘研究，不构成投资建议。推荐值代表观察优先级。",
+    "market": "市场概览",
+    "indexes": "指数",
+    "hot": "热点与龙头",
+    "limit_platform": "连板平台洗盘观察",
+    "notes": "数据提示",
+    "discipline": "明日执行纪律",
+    "none": "暂无符合当前规则的候选。",
 }
 
 
@@ -34,14 +34,13 @@ def render_html(recap: Recap, title: str) -> str:
         ".wrap{max-width:860px;margin:0 auto;background:#fff;padding:20px;border:1px solid #e6e8eb}",
         "h1{font-size:22px;margin:0 0 8px}h2{font-size:17px;margin:22px 0 10px;border-left:4px solid #2f6fed;padding-left:8px}",
         "table{width:100%;border-collapse:collapse;margin:8px 0 14px}th,td{border:1px solid #e6e8eb;padding:7px 8px;text-align:left;font-size:13px}th{background:#f1f4f8}",
-        ".muted{color:#666;font-size:13px}.score{font-weight:700;color:#d14}.tag{display:inline-block;background:#eef4ff;color:#1f5fbf;padding:2px 6px;margin:1px 3px 1px 0;border-radius:3px;font-size:12px}",
-        ".small{font-size:12px;color:#666}.empty{color:#777;padding:8px 0}",
+        ".muted{color:#666;font-size:13px}.score{font-weight:700;color:#d14}.empty{color:#777;padding:8px 0}.small{font-size:12px;color:#666}",
         "</style></head><body><div class=\"wrap\">",
         f"<h1>{escape(title)}</h1>",
         f"<p class=\"muted\">{LABELS['disclaimer']}</p>",
         render_market(recap),
         render_hot(recap),
-        render_opportunities(recap),
+        render_limit_platform(recap),
         render_notes(recap),
         render_discipline(),
         "</div></body></html>",
@@ -51,14 +50,13 @@ def render_html(recap: Recap, title: str) -> str:
 
 def render_market(recap: Recap) -> str:
     market = recap.market
-    index_html = render_indexes(market.indexes)
     return f"""
 <h2>{LABELS['market']}</h2>
 <table>
 <tr><th>市场情绪</th><th>上涨/下跌</th><th>涨停/跌停</th><th>主板成交额</th><th>平均涨跌幅</th></tr>
 <tr><td>{escape(market.sentiment)}</td><td>{market.up_count}/{market.down_count}</td><td>{market.limit_up_count}/{market.limit_down_count}</td><td>{format_amount(market.total_turnover)}</td><td>{market.average_change_pct:.2f}%</td></tr>
 </table>
-{index_html}
+{render_indexes(market.indexes)}
 """
 
 
@@ -83,7 +81,7 @@ def render_hot(recap: Recap) -> str:
 <tr><th>连板高度</th><th>行业热度</th><th>概念热度</th></tr>
 <tr><td>{max_board if max_board else '暂缺'}</td><td>{industries}</td><td>{concepts}</td></tr>
 </table>
-<h3>涨停池/龙头线索</h3>
+<h3>涨停池线索</h3>
 {leaders}
 """
 
@@ -94,17 +92,36 @@ def render_topic_list(items: list[HotTopic]) -> str:
     return "<br>".join(f"{escape(item.name)} {fmt_pct(item.change_pct)}" for item in items)
 
 
-def render_opportunities(recap: Recap) -> str:
-    groups = [
-        (TEXT["rebound"], [item for item in recap.candidates if TEXT["rebound"] in item.strategy_tags]),
-        (TEXT["pullback"], [item for item in recap.candidates if TEXT["pullback"] in item.strategy_tags]),
-        (TEXT["second_wave"], [item for item in recap.candidates if TEXT["second_wave"] in item.strategy_tags]),
-    ]
-    blocks = [f"<h2>{LABELS['opportunity']}</h2>"]
-    for label, items in groups:
-        blocks.append(f"<h3>{escape(label)}</h3>")
-        blocks.append(render_candidate_table(items))
-    return "\n".join(blocks)
+def render_limit_platform(recap: Recap) -> str:
+    return f"<h2>{LABELS['limit_platform']}</h2>\n{render_limit_platform_table(recap.limit_platform_candidates)}"
+
+
+def render_limit_platform_table(candidates: list[Candidate]) -> str:
+    if not candidates:
+        return f"<div class=\"empty\">{LABELS['none']}</div>"
+    rows = []
+    for item in candidates:
+        raw = item.raw or {}
+        rows.append(
+            "<tr>"
+            f"<td>{escape(item.code)}<br>{escape(item.name)}</td>"
+            f"<td>{escape(str(raw.get('stage') or ''))}</td>"
+            f"<td class=\"score\">{item.score}%</td>"
+            f"<td>{escape(str(raw.get('attack_label') or ''))}<br>{escape(fmt_pct(raw.get('attack_return_pct')))}</td>"
+            f"<td>{escape(fmt_pct(raw.get('platform_avg_amplitude_pct')))}</td>"
+            f"<td>{escape(fmt_pct(-float(raw.get('max_drawdown_pct') or 0)))}</td>"
+            f"<td>{escape(fmt_pct(raw.get('max_turnover_rate_pct')))}</td>"
+            f"<td>{escape(item.trigger)}</td>"
+            f"<td>{escape(item.invalidation)}</td>"
+            f"<td>{escape('; '.join(item.reasons))}</td>"
+            "</tr>"
+        )
+    return (
+        "<table><tr><th>股票</th><th>阶段</th><th>推荐值</th><th>前段形态</th><th>平台振幅</th>"
+        "<th>最大回撤</th><th>最大换手</th><th>入场观察条件</th><th>失效条件</th><th>核心依据</th></tr>"
+        + "".join(rows)
+        + "</table>"
+    )
 
 
 def render_candidate_table(candidates: list[Candidate], compact: bool = False) -> str:
@@ -132,7 +149,7 @@ def render_candidate_table(candidates: list[Candidate], compact: bool = False) -
             "</tr>"
         )
     return (
-        "<table><tr><th>股票</th><th>推荐值</th><th>策略标签</th><th>收盘/涨跌</th>"
+        "<table><tr><th>股票</th><th>推荐值</th><th>标签</th><th>收盘/涨跌</th>"
         "<th>入场观察条件</th><th>失效条件</th><th>核心依据</th></tr>"
         + "".join(rows)
         + "</table>"
@@ -165,12 +182,11 @@ def render_text(recap: Recap, title: str) -> str:
         "",
         f"{LABELS['market']}: 情绪{recap.market.sentiment}，上涨/下跌 {recap.market.up_count}/{recap.market.down_count}，涨停/跌停 {recap.market.limit_up_count}/{recap.market.limit_down_count}，成交额 {format_amount(recap.market.total_turnover)}。",
         "",
-        LABELS["opportunity"],
+        LABELS["limit_platform"],
     ]
-    for item in recap.candidates:
-        lines.append(
-            f"- {item.code} {item.name}: {item.score}% | {'/'.join(item.strategy_tags)} | {item.trigger}"
-        )
+    for item in recap.limit_platform_candidates:
+        stage = item.raw.get("stage") if item.raw else ""
+        lines.append(f"- {item.code} {item.name}: {item.score}% | {stage} | {item.trigger}")
         lines.append(f"  依据: {'; '.join(item.reasons)}")
     return "\n".join(lines) + "\n"
 

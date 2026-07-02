@@ -1,40 +1,52 @@
 app:
   timezone: Asia/Shanghai
-  report_time: "18:00"
-  data_ready_time: "09:00"
+  report_time: '17:30'
+  data_ready_time: 09:00
   skip_non_trading_day: true
   report_root: reports
   dry_run_output: reports/latest.html
-
 market:
   main_board_prefixes:
-    - "600"
-    - "601"
-    - "603"
-    - "605"
-    - "000"
-    - "001"
-    - "002"
-    - "003"
+  - '600'
+  - '601'
+  - '603'
+  - '605'
+  - '000'
+  - '001'
+  - '002'
+  - '003'
   exclude_name_keywords:
-    - "ST"
-    - "*ST"
-    - "\u9000"
-  min_turnover_amount: 300000000
-  max_candidates: 8
-
-scoring:
-  market_environment: 0.15
-  leader_strength: 0.25
-  historical_shape: 0.30
-  intraday_confirmation: 0.20
-  liquidity_risk: 0.10
-
+  - ST
+  - '*ST'
+  - 退
 notify:
   channel: email
-  title_prefix: "A-share short-term recap"
+  title_prefix: A-share short-term recap
   cache_max_age_hours: 18
-
 database:
   engine: mysql
   auto_create_database: true
+daily_update:
+  daily_bar_days: 10
+  daily_bar_sleep: 0.2
+  daily_bar_include_all: false
+  limit_pool_days: 1
+  limit_pool_sleep: 0.5
+pattern:
+  limit_platform:
+    enabled: true
+    max_candidates: 0
+    search_window_days: 45
+    attack_min_window: 4
+    attack_max_window: 10
+    attack_extension_days: 2
+    min_attack_return_pct: 20
+    min_platform_days: 3
+    max_platform_days: 15
+    min_platform_avg_amplitude_pct: 8
+    max_platform_drawdown_pct: 25
+    min_close_to_prior_platform_low_ratio: 1.0
+    max_attack_gain_retracement_pct: 80
+    huge_turnover_rate_pct: 25
+    huge_turnover_multiple: 2.5
+    confirm_close_ratio: 1.0

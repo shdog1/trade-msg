@@ -9,10 +9,10 @@ from time import sleep
 from .analysis import build_recap
 from .config import Settings, load_settings
 from .database import DatabaseError, MySQLStore
-from .market_data import AkshareMarketProvider, MarketDataError
+from .market_data import AkshareMarketProvider, MarketData, MarketDataError
 from .email_notifier import EmailNotifier, NotifyError
 from .report import render_report
-from .trading_calendar import load_trade_dates_from_akshare, now_in_timezone, resolve_trade_date_from_config
+from .trading_calendar import fallback_trade_dates, load_trade_dates_from_akshare, now_in_timezone, resolve_trade_date_from_config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -20,6 +20,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default=None, help="Path to config.yaml.")
     parser.add_argument("--dry-run", action="store_true", help="Write report locally without sending.")
     parser.add_argument("--send", action="store_true", help="Send report by email.")
+    parser.add_argument(
+        "--daily-job",
+        action="store_true",
+        help="Run full daily workflow: fetch quotes, update daily bars, update limit ladder, recap, and optionally send.",
+    )
     parser.add_argument("--fetch-only", action="store_true", help="Fetch market data into MySQL without rendering.")
     parser.add_argument("--backfill-days", type=int, default=None, help="Backfill daily bars for recent N days.")
     parser.add_argument(
@@ -67,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     if (
         not args.dry_run
         and not args.send
+        and not args.daily_job
         and not args.fetch_only
         and args.backfill_days is None
         and args.backfill_limit_pool_days is None
@@ -91,6 +97,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.fetch_only:
         return fetch_into_database(store, settings, trade_date)
 
+    if args.daily_job:
+        if not args.dry_run and not args.send:
+            args.dry_run = True
+        return run_daily_job(store, settings, trade_date, args.send, args.dry_run)
+
     if args.backfill_days is not None:
         return backfill_daily_bars(
             store,
@@ -110,45 +121,7 @@ def main(argv: list[str] | None = None) -> int:
             max(args.limit_pool_sleep, 0),
         )
 
-    try:
-        ensure_market_data(store, settings, trade_date)
-        data = store.load_market_data(trade_date)
-        recap = build_recap(data, settings.raw)
-        store.persist_recap(recap)
-        title, html, text = render_report(recap, settings.push_title_prefix)
-        report_date = recap.market.trade_date.isoformat()
-    except (DatabaseError, MarketDataError, ValueError) as exc:
-        if args.send:
-            cached = load_recent_cached_report(settings)
-            if cached:
-                title, html, text = cached
-                report_date = date_from_title(title)
-                print(f"Live data fetch failed; sending cached report instead: {exc}", file=sys.stderr)
-            else:
-                print(f"Failed to build recap: {exc}", file=sys.stderr)
-                return 2
-        else:
-            print(f"Failed to build recap: {exc}", file=sys.stderr)
-            return 2
-
-    if args.dry_run or args.send:
-        output = write_report_files(settings, html, text, report_date)
-        store.record_report(trade_date, title, str(output), str(settings.dated_text_output(report_date)), "generated")
-
-    if args.dry_run:
-        print(f"Wrote dry-run report to {output}")
-
-    if args.send:
-        try:
-            EmailNotifier.from_env().send(title=title, text_content=text, html_content=html)
-        except NotifyError as exc:
-            store.mark_report_sent(trade_date, "failed", str(exc))
-            print(f"Failed to send email message: {exc}", file=sys.stderr)
-            return 3
-        store.mark_report_sent(trade_date, "sent", None)
-        print("Email message sent.")
-
-    return 0
+    return build_render_and_notify(store, settings, trade_date, args.send, args.dry_run)
 
 
 def parse_trade_date(value: str) -> date:
@@ -165,6 +138,134 @@ def parse_stock_codes(values: list[str] | None) -> list[str] | None:
             if code:
                 codes.append(code)
     return codes or None
+
+
+def run_daily_job(
+    store: MySQLStore,
+    settings: Settings,
+    trade_date: date,
+    send: bool,
+    dry_run: bool,
+) -> int:
+    cfg = daily_update_config(settings)
+    print(f"Daily job started for {trade_date.isoformat()}.")
+
+    print("Step 1/4: fetch market snapshot and stock basic.")
+    try:
+        data = fetch_market_snapshot(store, settings, trade_date)
+    except (DatabaseError, MarketDataError, ValueError) as exc:
+        try:
+            store.record_fetch_run(trade_date, "akshare", "failed", str(exc))
+        except DatabaseError:
+            pass
+        print(f"Failed to fetch market data into MySQL: {exc}", file=sys.stderr)
+        return 2
+    print(f"Fetched market data into MySQL for {trade_date.isoformat()}.")
+
+    print("Step 2/4: batch update daily bars from market snapshot.")
+    try:
+        rows = store.persist_daily_bars_from_spot(trade_date, data.spot)
+        store.record_fetch_run(trade_date, "daily_bars:spot_batch", "success", None)
+    except (DatabaseError, ValueError) as exc:
+        try:
+            store.record_fetch_run(trade_date, "daily_bars:spot_batch", "failed", str(exc))
+        except DatabaseError:
+            pass
+        print(f"Failed to batch update daily bars from spot quote: {exc}", file=sys.stderr)
+        return 2
+    print(f"Batch wrote daily bars from spot quote, rows={rows}.")
+
+    print("Step 3/4: update limit-up ladder data.")
+    result = backfill_limit_pool(
+        store=store,
+        trade_date=trade_date,
+        days=int(cfg["limit_pool_days"]),
+        request_sleep=float(cfg["limit_pool_sleep"]),
+    )
+    if result != 0:
+        return result
+
+    print("Step 4/4: build recap, persist candidates, and notify.")
+    result = build_render_and_notify(store, settings, trade_date, send=send, dry_run=dry_run)
+    if result == 0:
+        print("Daily job finished.")
+    return result
+
+
+def daily_update_config(settings: Settings) -> dict[str, object]:
+    raw = settings.raw.get("daily_update", {})
+    return {
+        "daily_bar_days": max(1, int(float(raw.get("daily_bar_days", 10)))),
+        "daily_bar_sleep": max(0.0, float(raw.get("daily_bar_sleep", 0.2))),
+        "daily_bar_include_all": bool(raw.get("daily_bar_include_all", False)),
+        "limit_pool_days": max(1, int(float(raw.get("limit_pool_days", 1)))),
+        "limit_pool_sleep": max(0.0, float(raw.get("limit_pool_sleep", 0.5))),
+    }
+
+
+def build_render_and_notify(
+    store: MySQLStore,
+    settings: Settings,
+    trade_date: date,
+    send: bool,
+    dry_run: bool,
+) -> int:
+    try:
+        ensure_market_data(store, settings, trade_date)
+        data = store.load_market_data(trade_date)
+        recap = build_recap(data, settings.raw)
+        store.persist_recap(recap)
+        refresh_limit_up_reasons(store, trade_date)
+        title, html, text = render_report(recap, settings.push_title_prefix)
+        report_date = recap.market.trade_date.isoformat()
+    except (DatabaseError, MarketDataError, ValueError) as exc:
+        if send:
+            cached = load_recent_cached_report(settings)
+            if cached:
+                title, html, text = cached
+                report_date = date_from_title(title)
+                print(f"Live data fetch failed; sending cached report instead: {exc}", file=sys.stderr)
+            else:
+                print(f"Failed to build recap: {exc}", file=sys.stderr)
+                return 2
+        else:
+            print(f"Failed to build recap: {exc}", file=sys.stderr)
+            return 2
+
+    if dry_run or send:
+        output = write_report_files(settings, html, text, report_date)
+        store.record_report(trade_date, title, str(output), str(settings.dated_text_output(report_date)), "generated")
+
+    if dry_run:
+        print(f"Wrote dry-run report to {output}")
+
+    if send:
+        try:
+            EmailNotifier.from_env().send(title=title, text_content=text, html_content=html)
+        except NotifyError as exc:
+            store.mark_report_sent(trade_date, "failed", str(exc))
+            print(f"Failed to send email message: {exc}", file=sys.stderr)
+            return 3
+        store.mark_report_sent(trade_date, "sent", None)
+        print("Email message sent.")
+
+    return 0
+
+
+def refresh_limit_up_reasons(store: MySQLStore, trade_date: date) -> int:
+    codes = store.list_limit_pool_codes(trade_date)
+    missing_codes = store.missing_limit_reason_codes(codes, trade_date)
+    if not missing_codes:
+        store.sync_limit_up_reasons_to_pool(trade_date)
+        return 0
+    provider = AkshareMarketProvider()
+    rows = provider.fetch_limit_up_reasons(missing_codes, trade_date)
+    count = store.persist_limit_up_reasons(rows)
+    status = "success" if count == len(missing_codes) else "partial"
+    error = None if status == "success" else f"Fetched {count}/{len(missing_codes)} limit-up reasons."
+    store.record_fetch_run(trade_date, "limit_reasons:dabanke", status, error)
+    store.sync_limit_up_reasons_to_pool(trade_date)
+    return count
 
 
 def refresh_trade_calendar(store: MySQLStore, trade_date: date) -> int:
@@ -205,12 +306,8 @@ def should_skip_scheduled_run(store: MySQLStore, settings: Settings) -> bool:
 
 def fetch_into_database(store: MySQLStore, settings: Settings, trade_date: date) -> int:
     try:
-        provider = AkshareMarketProvider()
-        data = provider.fetch(settings.raw, trade_date=trade_date)
-        stock_basic = provider.fetch_stock_basic()
-        store.persist_market_data(data)
-        store.persist_stock_basic(stock_basic, fallback_spot=data.spot)
-    except (DatabaseError, MarketDataError) as exc:
+        fetch_market_snapshot(store, settings, trade_date)
+    except (DatabaseError, MarketDataError, ValueError) as exc:
         try:
             store.record_fetch_run(trade_date, "akshare", "failed", str(exc))
         except DatabaseError:
@@ -219,6 +316,15 @@ def fetch_into_database(store: MySQLStore, settings: Settings, trade_date: date)
         return 2
     print(f"Fetched market data into MySQL for {trade_date.isoformat()}.")
     return 0
+
+
+def fetch_market_snapshot(store: MySQLStore, settings: Settings, trade_date: date) -> MarketData:
+    provider = AkshareMarketProvider()
+    data = provider.fetch(settings.raw, trade_date=trade_date)
+    stock_basic = provider.fetch_stock_basic()
+    store.persist_market_data(data)
+    store.persist_stock_basic(stock_basic, fallback_spot=data.spot)
+    return data
 
 
 def backfill_daily_bars(
@@ -238,11 +344,29 @@ def backfill_daily_bars(
             store.persist_stock_basic(basic)
             codes = stock_codes if stock_codes else store.list_stock_codes(main_board_only=not include_all)
         start_date = trade_date - timedelta(days=max(days * 2, days + 30))
+        trade_dates = sorted(item for item in store.list_trade_dates() if start_date <= item <= trade_date)
+        if not trade_dates:
+            fetched_dates = load_trade_dates_from_akshare()
+            if fetched_dates:
+                store.persist_trade_calendar(fetched_dates)
+            trade_dates = sorted(item for item in store.list_trade_dates() if start_date <= item <= trade_date)
+        if not trade_dates:
+            trade_dates = sorted(item for item in fallback_trade_dates(trade_date) if start_date <= item <= trade_date)
         total_rows = 0
         failures: list[tuple[str, str]] = []
+        refresh_existing = bool(stock_codes)
         for index, code in enumerate(codes, start=1):
             latest = store.latest_daily_bar_date(code)
-            code_start = latest + timedelta(days=1) if latest else start_date
+            if refresh_existing or latest is None:
+                code_start = start_date
+            else:
+                code_start = latest + timedelta(days=1)
+            if trade_dates and not refresh_existing:
+                expected_dates = set(trade_dates)
+                existing_dates = store.list_daily_bar_dates(code, start_date, trade_date)
+                missing_dates = sorted(expected_dates - existing_dates)
+                if missing_dates:
+                    code_start = min(code_start, missing_dates[0])
             if code_start > trade_date:
                 continue
             try:

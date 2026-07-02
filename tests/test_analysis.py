@@ -5,7 +5,15 @@ import unittest
 
 import pandas as pd
 
-from src.analysis import TEXT, build_history_features, build_recap, filter_main_board, normalize_spot
+from src.analysis import (
+    TEXT,
+    build_history_features,
+    build_recap,
+    extend_attack_window,
+    filter_main_board,
+    limit_platform_config,
+    normalize_spot,
+)
 from src.market_data import MarketData
 from src.report import render_report
 
@@ -14,8 +22,6 @@ CONFIG = {
     "market": {
         "main_board_prefixes": ["600", "601", "603", "605", "000", "001", "002", "003"],
         "exclude_name_keywords": ["ST", "*ST", "退"],
-        "min_turnover_amount": 100_000_000,
-        "max_candidates": 3,
     }
 }
 
@@ -36,6 +42,35 @@ class AnalysisTest(unittest.TestCase):
 
         self.assertEqual(filtered["code"].tolist(), ["600001"])
 
+    def test_limit_platform_zero_max_candidates_means_no_cap(self) -> None:
+        config = {"pattern": {"limit_platform": {"max_candidates": 0}}}
+
+        self.assertEqual(limit_platform_config(config)["max_candidates"], 0)
+
+    def test_attack_window_stops_when_new_intraday_high_closes_down(self) -> None:
+        bars = pd.DataFrame(
+            [
+                {"trade_date": pd.Timestamp("2026-06-09"), "high": 6.40, "change_pct": 10.0},
+                {"trade_date": pd.Timestamp("2026-06-10"), "high": 7.04, "change_pct": 8.4},
+                {"trade_date": pd.Timestamp("2026-06-11"), "high": 7.05, "change_pct": -9.9},
+                {"trade_date": pd.Timestamp("2026-06-12"), "high": 6.60, "change_pct": 3.0},
+                {"trade_date": pd.Timestamp("2026-06-15"), "high": 6.69, "change_pct": 1.2},
+                {"trade_date": pd.Timestamp("2026-06-16"), "high": 7.17, "change_pct": 9.8},
+            ]
+        )
+        attack = {
+            "attack_end_index": 0,
+            "attack_end_date": pd.Timestamp("2026-06-09").date(),
+            "attack_high": 6.40,
+        }
+        cfg = {"attack_extension_days": 2, "min_platform_days": 3}
+
+        extended = extend_attack_window(bars, attack, len(bars) - 1, cfg)
+
+        self.assertEqual(extended["attack_end_index"], 1)
+        self.assertEqual(extended["attack_end_date"], pd.Timestamp("2026-06-10").date())
+        self.assertEqual(extended["attack_high"], 7.04)
+
     def test_normalize_spot_strips_exchange_prefix(self) -> None:
         df = normalize_spot(
             pd.DataFrame(
@@ -48,7 +83,7 @@ class AnalysisTest(unittest.TestCase):
 
         self.assertEqual(df["code"].tolist(), ["600001", "000001"])
 
-    def test_build_recap_scores_candidates(self) -> None:
+    def test_build_recap_suppresses_legacy_strategy_candidates(self) -> None:
         data = MarketData(
             spot=pd.DataFrame(
                 [
@@ -91,10 +126,8 @@ class AnalysisTest(unittest.TestCase):
         recap = build_recap(data, CONFIG)
 
         self.assertEqual(recap.market.total_count, 2)
-        self.assertGreaterEqual(len(recap.candidates), 1)
-        self.assertGreaterEqual(recap.candidates[0].score, 0)
-        self.assertLessEqual(recap.candidates[0].score, 100)
-        self.assertTrue(any("龙头" in tag for tag in recap.candidates[0].strategy_tags))
+        self.assertEqual(recap.candidates, [])
+        self.assertGreaterEqual(len(recap.limit_leaders), 1)
 
     def test_history_features_calculate_trend_metrics(self) -> None:
         bars = make_bars("600001", [10 + index * 0.2 for index in range(25)])
@@ -107,13 +140,13 @@ class AnalysisTest(unittest.TestCase):
         self.assertGreater(features["avg_turnover_5d"], 0)
         self.assertTrue(features["above_ma5"])
 
-    def test_history_driven_strategy_tags_are_reported(self) -> None:
+    def test_history_driven_legacy_strategy_tags_are_not_reported(self) -> None:
         data = MarketData(
             spot=pd.DataFrame(
                 [
-                    spot_row("600001", "Rebound", 13.2, 3.2, 900_000_000, 6.0, 1.8),
-                    spot_row("600002", "Pullback", 12.2, -1.0, 850_000_000, 5.5, 1.1),
-                    spot_row("600003", "Second", 15.0, 2.2, 900_000_000, 7.0, 1.4),
+                    spot_row("600001", "SampleA", 13.2, 3.2, 900_000_000, 6.0, 1.8),
+                    spot_row("600002", "SampleB", 12.2, -1.0, 850_000_000, 5.5, 1.1),
+                    spot_row("600003", "SampleC", 15.0, 2.2, 900_000_000, 7.0, 1.4),
                 ]
             ),
             hot_rank=pd.DataFrame(
@@ -140,12 +173,7 @@ class AnalysisTest(unittest.TestCase):
         )
 
         recap = build_recap(data, CONFIG)
-        tags = {item.code: item.strategy_tags for item in recap.candidates}
-
-        self.assertIn(TEXT["rebound"], tags["600001"])
-        self.assertIn(TEXT["pullback"], tags["600002"])
-        self.assertIn(TEXT["second_wave"], tags["600003"])
-        self.assertTrue(any("20" in reason for item in recap.candidates for reason in item.reasons))
+        self.assertEqual(recap.candidates, [])
 
     def test_missing_daily_bars_uses_fallback_with_lower_history_score(self) -> None:
         data = MarketData(
@@ -161,8 +189,188 @@ class AnalysisTest(unittest.TestCase):
 
         recap = build_recap(data, CONFIG)
 
-        self.assertEqual(recap.candidates[0].score_parts["historical_shape"], 6)
-        self.assertTrue(any(TEXT["history_missing"] in reason for reason in recap.candidates[0].reasons))
+        self.assertEqual(recap.candidates, [])
+
+    def test_limit_platform_pattern_selects_recovered_high(self) -> None:
+        data = MarketData(
+            spot=pd.DataFrame([spot_row("002421", "达实智能", 17.5, 3.0, 900_000_000, 18.0, 1.5)]),
+            hot_rank=pd.DataFrame(),
+            limit_pool=pd.DataFrame(),
+            indexes=pd.DataFrame(),
+            industries=pd.DataFrame(),
+            concepts=pd.DataFrame(),
+            trade_date=date(2026, 5, 29),
+            warnings=[],
+            daily_bars=make_limit_platform_bars("002421", recovered=True),
+        )
+
+        recap = build_recap(data, CONFIG)
+
+        self.assertEqual(len(recap.limit_platform_candidates), 1)
+        candidate = recap.limit_platform_candidates[0]
+        self.assertEqual(candidate.raw["stage"], TEXT["platform_confirm"])
+        self.assertIn("7天6板", candidate.raw["attack_label"])
+        joined_reasons = "；".join(candidate.reasons)
+        self.assertNotIn("巨量", joined_reasons)
+        self.assertNotIn("最大换手", joined_reasons)
+        self.assertNotIn("成交额放大", joined_reasons)
+
+    def test_limit_platform_pattern_keeps_watch_stage_before_breakout(self) -> None:
+        data = MarketData(
+            spot=pd.DataFrame([spot_row("002421", "达实智能", 16.0, -1.0, 700_000_000, 12.0, 1.2)]),
+            hot_rank=pd.DataFrame(),
+            limit_pool=pd.DataFrame(),
+            indexes=pd.DataFrame(),
+            industries=pd.DataFrame(),
+            concepts=pd.DataFrame(),
+            trade_date=date(2026, 5, 29),
+            warnings=[],
+            daily_bars=make_limit_platform_bars("002421", recovered=False),
+        )
+
+        recap = build_recap(data, CONFIG)
+
+        self.assertEqual(recap.limit_platform_candidates[0].raw["stage"], TEXT["platform_watch"])
+        self.assertLessEqual(recap.limit_platform_candidates[0].score, 78)
+
+    def test_limit_platform_intraday_breakout_without_recovered_close_stays_watch(self) -> None:
+        bars = make_limit_platform_bars("002421", recovered=False)
+        bars.loc[bars.index[-1], "high"] = 18.0
+        bars.loc[bars.index[-1], "amplitude_pct"] = 15.0
+        data = MarketData(
+            spot=pd.DataFrame([spot_row("002421", "达实智能", 16.0, -1.0, 700_000_000, 12.0, 1.2)]),
+            hot_rank=pd.DataFrame(),
+            limit_pool=pd.DataFrame(),
+            indexes=pd.DataFrame(),
+            industries=pd.DataFrame(),
+            concepts=pd.DataFrame(),
+            trade_date=date(2026, 5, 29),
+            warnings=[],
+            daily_bars=bars,
+        )
+
+        recap = build_recap(data, CONFIG)
+
+        candidate = recap.limit_platform_candidates[0]
+        self.assertEqual(candidate.raw["stage"], TEXT["platform_watch"])
+        self.assertIn("收盘站上", candidate.trigger)
+
+    def test_limit_platform_pattern_rejects_deep_drawdown(self) -> None:
+        bars = make_limit_platform_bars("002421", recovered=False)
+        bars.loc[bars.index[-2], "low"] = 12.0
+        bars.loc[bars.index[-2], "amplitude_pct"] = 28.0
+        data = MarketData(
+            spot=pd.DataFrame([spot_row("002421", "达实智能", 16.0, -1.0, 700_000_000, 12.0, 1.2)]),
+            hot_rank=pd.DataFrame(),
+            limit_pool=pd.DataFrame(),
+            indexes=pd.DataFrame(),
+            industries=pd.DataFrame(),
+            concepts=pd.DataFrame(),
+            trade_date=date(2026, 5, 29),
+            warnings=[],
+            daily_bars=bars,
+        )
+
+        recap = build_recap(data, CONFIG)
+
+        self.assertEqual(recap.limit_platform_candidates, [])
+
+    def test_limit_platform_pattern_rejects_close_below_prior_platform_low(self) -> None:
+        bars = make_limit_platform_bars("002421", recovered=False)
+        bars.loc[bars.index[-1], "close"] = 14.2
+        bars.loc[bars.index[-1], "low"] = 14.0
+        bars.loc[bars.index[-1], "high"] = 15.5
+        bars.loc[bars.index[-1], "amplitude_pct"] = 10.0
+        data = MarketData(
+            spot=pd.DataFrame([spot_row("002421", "破位样本", 14.2, -11.2, 700_000_000, 12.0, 1.2)]),
+            hot_rank=pd.DataFrame(),
+            limit_pool=pd.DataFrame(),
+            indexes=pd.DataFrame(),
+            industries=pd.DataFrame(),
+            concepts=pd.DataFrame(),
+            trade_date=date(2026, 5, 29),
+            warnings=[],
+            daily_bars=bars,
+        )
+
+        recap = build_recap(data, CONFIG)
+
+        self.assertEqual(recap.limit_platform_candidates, [])
+
+    def test_limit_platform_pattern_derives_missing_change_and_amplitude(self) -> None:
+        bars = make_limit_platform_bars("002421", recovered=True)
+        bars["change_pct"] = None
+        bars["amplitude_pct"] = None
+        data = MarketData(
+            spot=pd.DataFrame([spot_row("002421", "达实智能", 17.5, 3.0, 900_000_000, 18.0, 1.5)]),
+            hot_rank=pd.DataFrame(),
+            limit_pool=pd.DataFrame(),
+            indexes=pd.DataFrame(),
+            industries=pd.DataFrame(),
+            concepts=pd.DataFrame(),
+            trade_date=date(2026, 5, 29),
+            warnings=[],
+            daily_bars=bars,
+        )
+
+        recap = build_recap(data, CONFIG)
+
+        self.assertEqual(recap.limit_platform_candidates[0].raw["stage"], TEXT["platform_confirm"])
+
+    def test_limit_platform_pattern_selects_bbk_style_four_day_three_board(self) -> None:
+        data = MarketData(
+            spot=pd.DataFrame([spot_row("002251", "步步高", 4.86, 9.95, 1_638_000_000, 0.0, 1.4)]),
+            hot_rank=pd.DataFrame(),
+            limit_pool=pd.DataFrame(),
+            indexes=pd.DataFrame(),
+            industries=pd.DataFrame(),
+            concepts=pd.DataFrame(),
+            trade_date=date(2026, 6, 5),
+            warnings=[],
+            daily_bars=make_bbk_like_bars("002251"),
+        )
+
+        recap = build_recap(data, CONFIG)
+
+        self.assertEqual(recap.limit_platform_candidates[0].raw["stage"], TEXT["platform_watch"])
+        self.assertIn("4天3板", recap.limit_platform_candidates[0].raw["attack_label"])
+
+    def test_limit_platform_pattern_rejects_when_most_attack_gain_is_retraced(self) -> None:
+        bars = make_bbk_like_bars("002251")
+        bars.loc[bars.index[-1], "low"] = 3.76
+        bars.loc[bars.index[-1], "amplitude_pct"] = 25.2
+        data = MarketData(
+            spot=pd.DataFrame([spot_row("002251", "步步高", 4.86, 9.95, 1_638_000_000, 0.0, 1.4)]),
+            hot_rank=pd.DataFrame(),
+            limit_pool=pd.DataFrame(),
+            indexes=pd.DataFrame(),
+            industries=pd.DataFrame(),
+            concepts=pd.DataFrame(),
+            trade_date=date(2026, 6, 5),
+            warnings=[],
+            daily_bars=bars,
+        )
+
+        recap = build_recap(data, CONFIG)
+
+        self.assertEqual(recap.limit_platform_candidates, [])
+
+    def test_limit_platform_pattern_rejects_stale_long_platform(self) -> None:
+        data = MarketData(
+            spot=pd.DataFrame([spot_row("600156", "华升股份", 9.56, -1.0, 220_000_000, 0.0, 1.0)]),
+            hot_rank=pd.DataFrame(),
+            limit_pool=pd.DataFrame(),
+            indexes=pd.DataFrame(),
+            industries=pd.DataFrame(),
+            concepts=pd.DataFrame(),
+            trade_date=date(2026, 6, 5),
+            warnings=[],
+            daily_bars=make_stale_platform_bars("600156"),
+        )
+
+        recap = build_recap(data, CONFIG)
+
+        self.assertEqual(recap.limit_platform_candidates, [])
 
     def test_render_report_outputs_html_sections(self) -> None:
         data = MarketData(
@@ -195,9 +403,14 @@ class AnalysisTest(unittest.TestCase):
         self.assertIn("<!doctype html>", html)
         self.assertIn("市场概览", html)
         self.assertIn("热点与龙头", html)
-        self.assertIn("短线机会", html)
+        self.assertNotIn("\u77ed\u7ebf\u673a\u4f1a", html)
+        self.assertNotIn("\u9f99\u5934\u53cd\u5f39", html)
+        self.assertNotIn("\u9f99\u5934\u4f4e\u5438", html)
+        self.assertNotIn("\u9f99\u5934\u4e8c\u6ce2", html)
+        self.assertIn("连板平台洗盘观察", html)
         self.assertIn("龙头样本", html)
-        self.assertIn("龙头样本", text)
+        self.assertNotIn("龙头样本", text)
+        self.assertIn("连板平台洗盘观察", text)
 
 def spot_row(
     code: str,
@@ -238,6 +451,112 @@ def make_bars(code: str, closes: list[float]) -> pd.DataFrame:
                 "turnover": 500_000_000 + index * 20_000_000,
                 "turnover_rate": 5.0,
                 "amplitude_pct": 4.0,
+            }
+        )
+        previous = close
+    return pd.DataFrame(rows)
+
+
+def make_limit_platform_bars(code: str, recovered: bool = True) -> pd.DataFrame:
+    baseline = [10.0] * 20
+    attack = [11.0, 12.1, 13.31, 12.85, 14.14, 15.55, 17.10]
+    platform = [15.6, 16.5, 15.8, 17.5 if recovered else 16.0]
+    closes = baseline + attack + platform
+    dates = pd.bdate_range(end="2026-05-29", periods=len(closes))
+    rows = []
+    previous = closes[0]
+    for index, close in enumerate(closes):
+        change_pct = 0.0 if index == 0 else (close / previous - 1) * 100
+        is_attack = 20 <= index < 27
+        is_platform = index >= 27
+        high = close * (1.015 if not is_platform else 1.08)
+        low = close * (0.985 if not is_platform else 0.92)
+        turnover = 120_000_000
+        turnover_rate = 5.0
+        amplitude = (high - low) / close * 100
+        if is_attack:
+            turnover = 900_000_000 if index == 23 else 500_000_000
+            turnover_rate = 50.0 if index == 23 else 22.0
+        if is_platform:
+            turnover = 650_000_000
+            turnover_rate = 18.0
+        rows.append(
+            {
+                "trade_date": dates[index].date(),
+                "code": code,
+                "open": close * 0.98,
+                "high": high,
+                "low": low,
+                "close": close,
+                "change_pct": change_pct,
+                "turnover": turnover,
+                "turnover_rate": turnover_rate,
+                "amplitude_pct": amplitude,
+            }
+        )
+        previous = close
+    return pd.DataFrame(rows)
+
+
+def make_bbk_like_bars(code: str) -> pd.DataFrame:
+    rows = make_bars(code, [3.8] * 20)
+    extra = [
+        ("2026-05-26", 3.75, 4.15, 3.74, 4.15, 1_213_542),
+        ("2026-05-27", 4.08, 4.57, 4.02, 4.57, 2_852_145),
+        ("2026-05-28", 4.53, 4.80, 4.41, 4.44, 4_211_169),
+        ("2026-05-29", 4.45, 4.88, 4.32, 4.88, 3_364_286),
+        ("2026-06-01", 4.61, 5.20, 4.61, 5.00, 4_893_200),
+        ("2026-06-02", 4.85, 4.99, 4.68, 4.88, 3_677_198),
+        ("2026-06-03", 4.75, 4.96, 4.56, 4.84, 3_608_467),
+        ("2026-06-04", 4.80, 4.91, 4.36, 4.42, 3_438_547),
+        ("2026-06-05", 4.46, 4.86, 4.44, 4.86, 3_431_819),
+    ]
+    previous = 3.77
+    rows = rows.iloc[:20].copy()
+    rows["turnover"] = 500_000
+    additions = []
+    for item_date, open_price, high, low, close, turnover in extra:
+        additions.append(
+            {
+                "trade_date": pd.Timestamp(item_date).date(),
+                "code": code,
+                "open": open_price,
+                "high": high,
+                "low": low,
+                "close": close,
+                "change_pct": (close / previous - 1) * 100,
+                "turnover": turnover,
+                "turnover_rate": None,
+                "amplitude_pct": (high - low) / previous * 100,
+            }
+        )
+        previous = close
+    return pd.concat([rows, pd.DataFrame(additions)], ignore_index=True)
+
+
+def make_stale_platform_bars(code: str) -> pd.DataFrame:
+    baseline = [8.0] * 20
+    attack = [8.8, 9.7, 10.67, 10.2, 11.2, 12.3, 13.5]
+    platform = [12.5, 13.1, 12.2, 13.3, 12.1, 11.7, 11.3, 11.0, 10.8, 10.6, 10.5, 10.3, 10.2, 10.1, 10.0, 9.9]
+    closes = baseline + attack + platform
+    dates = pd.bdate_range(end="2026-06-05", periods=len(closes))
+    rows = []
+    previous = closes[0]
+    for index, close in enumerate(closes):
+        high = close * 1.06
+        low = close * 0.94
+        rows.append(
+            {
+                "trade_date": dates[index].date(),
+                "code": code,
+                "open": close,
+                "high": high,
+                "low": low,
+                "close": close,
+                "change_pct": 0.0 if index == 0 else (close / previous - 1) * 100,
+                "turnover": 800_000_000 if index >= 20 else 100_000_000,
+                "turnover_rate": None,
+                "amplitude_pct": (high - low) / previous * 100 if previous else 0,
             }
         )
         previous = close

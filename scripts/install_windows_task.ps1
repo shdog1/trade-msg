@@ -1,6 +1,7 @@
 param(
     [string]$TaskName = "TradeMsgDailyRecap",
-    [string]$Time = "18:00"
+    [string]$Time = "18:00",
+    [int]$ExecutionTimeLimitMinutes = 180
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,12 +14,12 @@ if (-not (Test-Path $Python)) {
 
 $Action = New-ScheduledTaskAction `
     -Execute $Python `
-    -Argument "-m src.cli --send --scheduled" `
+    -Argument "-m src.cli --daily-job --send --scheduled" `
     -WorkingDirectory $ProjectRoot
 
 $Trigger = New-ScheduledTaskTrigger -Daily -At $Time
 $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-$Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+$Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes $ExecutionTimeLimitMinutes)
 
 Register-ScheduledTask `
     -TaskName $TaskName `
@@ -29,4 +30,4 @@ Register-ScheduledTask `
     -Description "Send daily A-share short-term recap by email." `
     -Force
 
-Write-Host "Installed scheduled task '$TaskName' at $Time."
+Write-Host "Installed scheduled task '$TaskName' at $Time. Execution limit: $ExecutionTimeLimitMinutes minutes."

@@ -91,6 +91,10 @@ class MySQLStore:
                 conn.execute(sqlalchemy.text(statement))
             ensure_column(conn, self.config.database, "limit_pool", "industry", "VARCHAR(128) NULL")
             ensure_column(conn, self.config.database, "limit_pool", "reason", "TEXT NULL")
+            ensure_column(conn, self.config.database, "market_quotes", "volume", "DOUBLE NULL")
+            ensure_column(conn, self.config.database, "market_quotes", "total_market_cap", "DOUBLE NULL")
+            ensure_column(conn, self.config.database, "quote_snapshots", "volume", "DOUBLE NULL")
+            ensure_column(conn, self.config.database, "quote_snapshots", "total_market_cap", "DOUBLE NULL")
             self._migrate_primary_keys_and_indexes(conn)
 
     def _migrate_primary_keys_and_indexes(self, conn: Any) -> None:
@@ -128,10 +132,12 @@ class MySQLStore:
                     "name": row.name,
                     "close_price": row.close,
                     "change_pct": row.change_pct,
+                    "volume": getattr(row, "volume", None),
                     "turnover": row.turnover,
                     "turnover_rate": getattr(row, "turnover_rate", None),
                     "volume_ratio": getattr(row, "volume_ratio", None),
                     "amplitude_pct": getattr(row, "amplitude_pct", None),
+                    "total_market_cap": getattr(row, "total_market_cap", None),
                     "source": "akshare",
                 }
                 for row in spot.itertuples()
@@ -205,9 +211,35 @@ class MySQLStore:
             ).scalar_one_or_none()
         return value
 
+    def list_daily_bar_dates(self, code: str, start_date: date, end_date: date) -> set[date]:
+        df = self._read_df(
+            """
+            SELECT trade_date
+            FROM daily_bars
+            WHERE code = :code
+              AND trade_date BETWEEN :start_date AND :end_date
+            """,
+            {"code": code, "start_date": start_date, "end_date": end_date},
+        )
+        if df.empty:
+            return set()
+        return {pd.to_datetime(item).date() for item in df["trade_date"].dropna().tolist()}
+
     def persist_daily_bars(self, df: pd.DataFrame, code: str, source: str = "akshare") -> int:
         self.initialize()
         rows = daily_bar_rows(df, code, source)
+        with self.engine.begin() as conn:
+            self._upsert_many(conn, "daily_bars", rows)
+        return len(rows)
+
+    def persist_daily_bars_from_spot(
+        self,
+        trade_date: date,
+        spot: pd.DataFrame,
+        source: str = "akshare",
+    ) -> int:
+        self.initialize()
+        rows = daily_bar_rows_from_spot(spot, trade_date, source)
         with self.engine.begin() as conn:
             self._upsert_many(conn, "daily_bars", rows)
         return len(rows)
@@ -222,6 +254,78 @@ class MySQLStore:
         with self.engine.begin() as conn:
             self._upsert_many(conn, "limit_pool", rows)
         return len(rows)
+
+    def missing_limit_reason_codes(self, codes: list[str], as_of_date: date) -> list[str]:
+        if not codes:
+            return []
+        sqlalchemy = require_sqlalchemy()
+        placeholders = ", ".join(f":code_{index}" for index in range(len(codes)))
+        params: dict[str, Any] = {"as_of_date": as_of_date}
+        params.update({f"code_{index}": code for index, code in enumerate(codes)})
+        with self.engine.begin() as conn:
+            existing = conn.execute(
+                sqlalchemy.text(
+                    "SELECT code FROM limit_up_reasons "
+                    "WHERE as_of_date = :as_of_date AND source = 'dabanke' "
+                    f"AND code IN ({placeholders})"
+                ),
+                params,
+            ).scalars().all()
+        existing_codes = {str(code) for code in existing}
+        return [code for code in codes if code not in existing_codes]
+
+    def list_limit_pool_codes(self, trade_date: date) -> list[str]:
+        df = self._read_df(
+            "SELECT DISTINCT code FROM limit_pool WHERE trade_date = :trade_date ORDER BY code",
+            {"trade_date": trade_date},
+        )
+        if df.empty:
+            return []
+        return [str(code) for code in df["code"].dropna().tolist()]
+
+    def persist_limit_up_reasons(self, rows: list[dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        sqlalchemy = require_sqlalchemy()
+        self.initialize()
+        with self.engine.begin() as conn:
+            self._upsert_many(conn, "limit_up_reasons", rows)
+            for row in rows:
+                if not row.get("reason"):
+                    continue
+                conn.execute(
+                    sqlalchemy.text(
+                        "UPDATE limit_pool SET reason = :reason "
+                        "WHERE trade_date = :trade_date AND code = :code"
+                    ),
+                    {
+                        "reason": row["reason"],
+                        "trade_date": row["as_of_date"],
+                        "code": row["code"],
+                    },
+                )
+        return len(rows)
+
+    def sync_limit_up_reasons_to_pool(self, trade_date: date) -> int:
+        sqlalchemy = require_sqlalchemy()
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                sqlalchemy.text(
+                    """
+                    UPDATE limit_pool lp
+                    JOIN limit_up_reasons lur
+                      ON lur.as_of_date = lp.trade_date
+                     AND lur.code = lp.code
+                     AND lur.source = 'dabanke'
+                    SET lp.reason = lur.reason
+                    WHERE lp.trade_date = :trade_date
+                      AND lur.reason IS NOT NULL
+                      AND TRIM(lur.reason) <> ''
+                    """
+                ),
+                {"trade_date": trade_date},
+            )
+        return int(result.rowcount or 0)
 
     def derive_limit_pool_from_daily_bars(self, trade_date: date, lookback_days: int = 40) -> int:
         self.initialize()
@@ -275,8 +379,9 @@ class MySQLStore:
     def load_market_data(self, trade_date: date) -> MarketData:
         self.initialize()
         spot = self._read_df(
-            "SELECT code, name, close_price AS close, change_pct, turnover, "
-            "turnover_rate, volume_ratio, amplitude_pct FROM market_quotes WHERE trade_date = :trade_date",
+            "SELECT code, name, close_price AS close, change_pct, volume, turnover, "
+            "turnover_rate, volume_ratio, amplitude_pct, total_market_cap "
+            "FROM market_quotes WHERE trade_date = :trade_date",
             {"trade_date": trade_date},
         )
         hot_rank = self._read_df(
@@ -305,6 +410,13 @@ class MySQLStore:
             "FROM daily_bars WHERE trade_date BETWEEN :start_date AND :trade_date ORDER BY code, trade_date",
             {"start_date": trade_date - timedelta(days=120), "trade_date": trade_date},
         )
+        quote_bars = self._read_df(
+            "SELECT trade_date, code, name, NULL AS open, NULL AS high, NULL AS low, "
+            "close_price AS close, change_pct, turnover, turnover_rate, amplitude_pct "
+            "FROM market_quotes WHERE trade_date BETWEEN :start_date AND :trade_date ORDER BY code, trade_date",
+            {"start_date": trade_date - timedelta(days=120), "trade_date": trade_date},
+        )
+        daily_bars = merge_daily_bars_with_quotes(daily_bars, quote_bars)
         return MarketData(
             spot=spot,
             hot_rank=hot_rank,
@@ -319,11 +431,28 @@ class MySQLStore:
 
     def persist_recap(self, recap: Recap) -> None:
         self.initialize()
+        sqlalchemy = require_sqlalchemy()
         with self.engine.begin() as conn:
+            conn.execute(
+                sqlalchemy.text("DELETE FROM recap_candidates WHERE trade_date = :trade_date"),
+                {"trade_date": recap.market.trade_date},
+            )
             self._upsert_many(
                 conn,
                 "recap_candidates",
                 [candidate_to_row(recap.market.trade_date, item) for item in recap.candidates],
+            )
+            conn.execute(
+                sqlalchemy.text(
+                    "DELETE FROM recap_pattern_candidates "
+                    "WHERE trade_date = :trade_date AND pattern_type = :pattern_type"
+                ),
+                {"trade_date": recap.market.trade_date, "pattern_type": "limit_platform_wash"},
+            )
+            self._upsert_many(
+                conn,
+                "recap_pattern_candidates",
+                [pattern_candidate_to_row(recap.market.trade_date, item) for item in recap.limit_platform_candidates],
             )
 
     def record_report(self, trade_date: date, title: str, html_path: str, text_path: str, status: str) -> None:
@@ -389,11 +518,21 @@ class MySQLStore:
         if not rows:
             return
         sqlalchemy = require_sqlalchemy()
+        rows = [
+            {key: database_safe_value(value) for key, value in row.items()}
+            for row in rows
+        ]
         columns = [col for col in rows[0].keys() if col != "id"]
         update_columns = [col for col in columns if col not in UNIQUE_KEY_COLUMNS[table]]
         insert_cols = ", ".join(f"`{col}`" for col in columns)
         values_cols = ", ".join(f":{col}" for col in columns)
-        update_clause = ", ".join(f"`{col}` = VALUES(`{col}`)" for col in update_columns)
+        update_parts = []
+        for col in update_columns:
+            if table == "limit_pool" and col in {"industry", "reason"}:
+                update_parts.append(f"`{col}` = COALESCE(VALUES(`{col}`), `{col}`)")
+            else:
+                update_parts.append(f"`{col}` = VALUES(`{col}`)")
+        update_clause = ", ".join(update_parts)
         if not update_clause:
             update_clause = f"`{columns[0]}` = VALUES(`{columns[0]}`)"
         sql = (
@@ -415,6 +554,38 @@ def candidate_to_row(trade_date: date, candidate: Candidate) -> dict[str, Any]:
         "reasons": json.dumps(candidate.reasons, ensure_ascii=False),
         "score_parts": json.dumps(candidate.score_parts, ensure_ascii=False),
     }
+
+
+def pattern_candidate_to_row(trade_date: date, candidate: Candidate) -> dict[str, Any]:
+    raw = candidate.raw or {}
+    return {
+        "trade_date": trade_date,
+        "code": candidate.code,
+        "name": candidate.name,
+        "pattern_type": str(raw.get("pattern_type") or "limit_platform_wash"),
+        "stage": str(raw.get("stage") or ""),
+        "score": candidate.score,
+        "trigger_text": candidate.trigger,
+        "invalidation_text": candidate.invalidation,
+        "reasons": json.dumps(candidate.reasons, ensure_ascii=False),
+        "score_parts": json.dumps(candidate.score_parts, ensure_ascii=False),
+    }
+
+
+def merge_daily_bars_with_quotes(daily_bars: pd.DataFrame, quote_bars: pd.DataFrame) -> pd.DataFrame:
+    if quote_bars.empty:
+        return daily_bars
+    if daily_bars.empty:
+        return quote_bars
+    daily = daily_bars.copy()
+    quotes = quote_bars.copy()
+    daily["trade_date"] = pd.to_datetime(daily["trade_date"], errors="coerce").dt.date
+    quotes["trade_date"] = pd.to_datetime(quotes["trade_date"], errors="coerce").dt.date
+    daily_keys = set(zip(daily["trade_date"], daily["code"]))
+    quotes = quotes[[key not in daily_keys for key in zip(quotes["trade_date"], quotes["code"])]]
+    if quotes.empty:
+        return daily_bars
+    return pd.concat([daily, quotes], ignore_index=True).sort_values(["code", "trade_date"])
 
 
 def stock_basic_rows(df: pd.DataFrame) -> list[dict[str, Any]]:
@@ -464,10 +635,12 @@ def quote_snapshot_rows(market_rows: list[dict[str, Any]]) -> list[dict[str, Any
             "name": row["name"],
             "close_price": row["close_price"],
             "change_pct": row["change_pct"],
+            "volume": row.get("volume"),
             "turnover": row["turnover"],
             "turnover_rate": row["turnover_rate"],
             "volume_ratio": row["volume_ratio"],
             "amplitude_pct": row["amplitude_pct"],
+            "total_market_cap": row.get("total_market_cap"),
             "source": row["source"],
             "fetched_at": fetched_at,
         }
@@ -513,6 +686,36 @@ def daily_bar_rows(df: pd.DataFrame, code: str, source: str) -> list[dict[str, A
                 "turnover": optional_float(item.get(columns["turnover"])) if columns["turnover"] else None,
                 "turnover_rate": optional_float(item.get(columns["turnover_rate"])) if columns["turnover_rate"] else None,
                 "amplitude_pct": optional_float(item.get(columns["amplitude_pct"])) if columns["amplitude_pct"] else None,
+                "source": source,
+            }
+        )
+    return rows
+
+
+def daily_bar_rows_from_spot(df: pd.DataFrame, trade_date: date, source: str) -> list[dict[str, Any]]:
+    if df.empty:
+        return []
+    spot = normalize_spot(df)
+    rows: list[dict[str, Any]] = []
+    for item in spot.to_dict("records"):
+        code = normalize_stock_code(item.get("code"))
+        close_price = optional_float(item.get("close"))
+        if not code or close_price is None:
+            continue
+        rows.append(
+            {
+                "trade_date": trade_date,
+                "code": code,
+                "name": str(item.get("name", "")),
+                "open_price": optional_float(item.get("open")),
+                "high_price": optional_float(item.get("high")),
+                "low_price": optional_float(item.get("low")),
+                "close_price": close_price,
+                "change_pct": optional_float(item.get("change_pct")),
+                "volume": optional_float(item.get("volume")),
+                "turnover": optional_float(item.get("turnover")),
+                "turnover_rate": optional_float(item.get("turnover_rate")),
+                "amplitude_pct": optional_float(item.get("amplitude_pct")),
                 "source": source,
             }
         )
@@ -601,6 +804,16 @@ def optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def database_safe_value(value: Any) -> Any:
+    try:
+        missing = pd.isna(value)
+        if not hasattr(missing, "__len__") and bool(missing):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
 
 
 def infer_exchange(code: str) -> str:
@@ -716,9 +929,11 @@ UNIQUE_KEY_COLUMNS = {
     "daily_bars": ["trade_date", "code", "source"],
     "index_quotes": ["trade_date", "name", "source"],
     "limit_pool": ["trade_date", "code", "source"],
+    "limit_up_reasons": ["as_of_date", "code", "source"],
     "hot_ranks": ["trade_date", "code", "source"],
     "hot_topics": ["trade_date", "topic_type", "name", "source"],
     "recap_candidates": ["trade_date", "code"],
+    "recap_pattern_candidates": ["trade_date", "code", "pattern_type"],
     "recap_reports": ["trade_date"],
 }
 
@@ -759,6 +974,10 @@ INDEX_COLUMNS = {
         "idx_limit_pool_trade_days": ["trade_date", "limit_up_days"],
         "idx_limit_pool_code_trade": ["code", "trade_date"],
     },
+    "limit_up_reasons": {
+        "idx_limit_up_reasons_code_event": ["code", "event_date"],
+        "idx_limit_up_reasons_as_of": ["as_of_date"],
+    },
     "hot_ranks": {
         "idx_hot_ranks_trade_rank": ["trade_date", "hot_rank"],
         "idx_hot_ranks_code_trade": ["code", "trade_date"],
@@ -769,6 +988,11 @@ INDEX_COLUMNS = {
     "recap_candidates": {
         "idx_recap_candidates_trade_score": ["trade_date", "score"],
         "idx_recap_candidates_code_trade": ["code", "trade_date"],
+    },
+    "recap_pattern_candidates": {
+        "idx_recap_pattern_candidates_trade_score": ["trade_date", "score"],
+        "idx_recap_pattern_candidates_code_trade": ["code", "trade_date"],
+        "idx_recap_pattern_candidates_pattern_stage": ["pattern_type", "stage"],
     },
     "recap_reports": {
         "idx_recap_reports_send_status": ["send_status"],
@@ -830,10 +1054,12 @@ SCHEMA_SQL = [
         name VARCHAR(64) NOT NULL,
         close_price DOUBLE NULL,
         change_pct DOUBLE NULL,
+        volume DOUBLE NULL,
         turnover DOUBLE NULL,
         turnover_rate DOUBLE NULL,
         volume_ratio DOUBLE NULL,
         amplitude_pct DOUBLE NULL,
+        total_market_cap DOUBLE NULL,
         source VARCHAR(32) NOT NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uk_market_quotes_business (trade_date, code, source),
@@ -851,10 +1077,12 @@ SCHEMA_SQL = [
         name VARCHAR(64) NOT NULL,
         close_price DOUBLE NULL,
         change_pct DOUBLE NULL,
+        volume DOUBLE NULL,
         turnover DOUBLE NULL,
         turnover_rate DOUBLE NULL,
         volume_ratio DOUBLE NULL,
         amplitude_pct DOUBLE NULL,
+        total_market_cap DOUBLE NULL,
         source VARCHAR(32) NOT NULL,
         fetched_at DATETIME NOT NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -915,6 +1143,21 @@ SCHEMA_SQL = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
+    CREATE TABLE IF NOT EXISTS limit_up_reasons (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        as_of_date DATE NOT NULL,
+        code VARCHAR(16) NOT NULL,
+        event_date DATE NULL,
+        event_type VARCHAR(32) NULL,
+        reason TEXT NULL,
+        source VARCHAR(32) NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_limit_up_reasons_business (as_of_date, code, source),
+        KEY idx_limit_up_reasons_code_event (code, event_date),
+        KEY idx_limit_up_reasons_as_of (as_of_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
     CREATE TABLE IF NOT EXISTS hot_ranks (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
         trade_date DATE NOT NULL,
@@ -957,6 +1200,26 @@ SCHEMA_SQL = [
         UNIQUE KEY uk_recap_candidates_business (trade_date, code),
         KEY idx_recap_candidates_trade_score (trade_date, score),
         KEY idx_recap_candidates_code_trade (code, trade_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS recap_pattern_candidates (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        trade_date DATE NOT NULL,
+        code VARCHAR(16) NOT NULL,
+        name VARCHAR(64) NOT NULL,
+        pattern_type VARCHAR(64) NOT NULL,
+        stage VARCHAR(32) NOT NULL,
+        score INT NOT NULL,
+        trigger_text TEXT NOT NULL,
+        invalidation_text TEXT NOT NULL,
+        reasons JSON NOT NULL,
+        score_parts JSON NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_recap_pattern_candidates_business (trade_date, code, pattern_type),
+        KEY idx_recap_pattern_candidates_trade_score (trade_date, score),
+        KEY idx_recap_pattern_candidates_code_trade (code, trade_date),
+        KEY idx_recap_pattern_candidates_pattern_stage (pattern_type, stage)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """

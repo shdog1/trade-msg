@@ -17,10 +17,6 @@ class Settings:
     root: Path = ROOT
 
     @property
-    def max_candidates(self) -> int:
-        return int(self.raw["market"].get("max_candidates", 8))
-
-    @property
     def dry_run_output(self) -> Path:
         configured = self.raw["app"].get("dry_run_output", "reports/latest.md")
         return self.root / configured

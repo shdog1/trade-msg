@@ -58,6 +58,7 @@ class Candidate:
 class Recap:
     market: MarketSnapshot
     candidates: list[Candidate]
+    limit_platform_candidates: list[Candidate]
     industries: list[HotTopic]
     concepts: list[HotTopic]
     limit_leaders: list[Candidate]
